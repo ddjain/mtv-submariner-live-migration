@@ -1,0 +1,27 @@
+apiVersion: forklift.konveyor.io/v1beta1
+kind: Plan
+metadata:
+  name: earth-vm-migration-plan
+  namespace: openshift-mtv
+spec:
+  provider:
+    source:
+      name: host
+      namespace: openshift-mtv
+    destination:
+      name: green-cluster
+      namespace: openshift-mtv
+  map:
+    network:
+      name: blue-green-network-map
+      namespace: openshift-mtv
+    storage:
+      name: blue-green-storage-map
+      namespace: openshift-mtv
+  targetNamespace: default
+  vms:
+    - name: earth-vm
+      namespace: default
+  type: live
+  preserveClusterCpuModel: true
+  preserveStaticIPs: false

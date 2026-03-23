@@ -1,0 +1,11 @@
+apiVersion: forklift.konveyor.io/v1beta1
+kind: Provider
+metadata:
+  name: green-cluster
+  namespace: openshift-mtv
+spec:
+  type: openshift
+  url: "https://api.<green-cluster-domain>:6443"
+  secret:
+    name: green-cluster-secret
+    namespace: openshift-mtv

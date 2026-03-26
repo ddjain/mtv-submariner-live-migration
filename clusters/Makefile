@@ -39,6 +39,9 @@ SSH_READY_TIMEOUT ?= 600
 # If the shell exports SSH_READY_TIMEOUT= (empty), ?= keeps it empty and breaks --ssh-ready-timeout; coerce:
 SSH_READY_TIMEOUT_EFFECTIVE := $(or $(SSH_READY_TIMEOUT),600)
 
+# Seconds to wait after workload setup before pre-migration check (default 30)
+STABILIZE_WAIT ?= 120
+
 SCRIPTS_DIR   := $(CURDIR)/scripts
 TEMPLATE_DIR  := $(CURDIR)/../templates
 GENERATED_DIR := $(CURDIR)/scripts/generated
@@ -88,7 +91,8 @@ run-e2e: ## Full e2e: random VM (or VM_NAME_OVERRIDE), create, setup, pre-check,
 		--report-dir $(OUTPUT_DIR) \
 		$(if $(VM_NAME_OVERRIDE),--vm $(VM_NAME_OVERRIDE),) \
 		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",) \
-		--ssh-ready-timeout $(SSH_READY_TIMEOUT_EFFECTIVE)
+		--ssh-ready-timeout $(SSH_READY_TIMEOUT_EFFECTIVE) \
+		--stabilize-wait $(STABILIZE_WAIT)
 
 # ──────────────────────────────────────────────
 # Validation & Workloads
@@ -208,6 +212,7 @@ help: ## Show this help
 	@echo "  LOCAL_SSH_OPTS='-o StrictHostKeyChecking=accept-new' for unattended SSH on setup/pre/post-check"
 	@echo "  VM_NAME_OVERRIDE=name for make run-e2e (fixed VM instead of random)"
 	@echo "  SSH_READY_TIMEOUT=900  seconds to wait for guest SSH after VM Ready (default 600)"
+	@echo "  STABILIZE_WAIT=60      seconds to wait after workload setup before pre-check (default 30)"
 	@echo ""
 
 .DEFAULT_GOAL := help

@@ -1,0 +1,42 @@
+# GCP credentials
+gcp-service-account-key.json
+
+# OpenShift pull secret
+pull-secret.txt
+
+# OpenShift installer output directories (contain kubeconfig, kubeadmin-password, terraform state, etc.)
+clusters/source-cluster/
+clusters/target-cluster/
+clusters/*-cluster/
+
+# OpenShift installer artifacts (if found outside cluster dirs)
+kubeadmin-password
+metadata.json
+.openshift_install_state.json
+.openshift_install.log
+
+# Kubeconfig files (standalone, outside cluster dirs)
+kubeconfig
+kubeconfig-*
+
+# Terraform generated files
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+terraform.tfvars
+
+# Installer working directories
+install-artifacts/
+
+# OS files
+.DS_Store
+
+# IDE / tooling
+.serena
+
+# Generated/rendered manifests
+clusters/scripts/generated/
+
+# Generated reports
+clusters/scripts/reports/

@@ -1,0 +1,9 @@
+apiVersion: forklift.konveyor.io/v1beta1
+kind: Migration
+metadata:
+  name: REPLACE_VM_NAME-migration
+  namespace: openshift-mtv
+spec:
+  plan:
+    name: REPLACE_VM_NAME-migration-plan
+    namespace: openshift-mtv

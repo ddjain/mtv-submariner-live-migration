@@ -4,7 +4,7 @@ Step-by-step guide to set up cross-cluster live migration of VirtualMachines bet
 
 ## Overview
 
-This guide enables live migration of running VMs from blue-cluster (source) to green-cluster (target) with zero downtime, using:
+This guide enables live migration of running VMs from blue-cluster to green-cluster with zero downtime, using:
 
 - **OpenShift Virtualization (CNV)** -- VM lifecycle management
 - **Migration Toolkit for Virtualization (MTV/Forklift)** -- migration orchestration
@@ -13,7 +13,7 @@ This guide enables live migration of running VMs from blue-cluster (source) to g
 ### Architecture
 
 ```
-BLUE CLUSTER (Source)                   GREEN CLUSTER (Target)
+BLUE CLUSTER                            GREEN CLUSTER
 +--------------------------+            +--------------------------+
 | Pod CIDR: 10.128.0.0/14 |            | Pod CIDR: 10.224.0.0/14  |
 | Svc CIDR: 172.30.0.0/16 |<==IPsec==> | Svc CIDR: 172.24.0.0/16  |

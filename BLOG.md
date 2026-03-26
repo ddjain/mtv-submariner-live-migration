@@ -30,10 +30,10 @@ That's **cross-cluster live migration** (CCLM), and as of OpenShift 4.21, it's p
 
 ### How It Works
 
-MTV creates a migration plan that specifies which VMs to move and where. Submariner provides the encrypted network path between clusters. During migration, the VM's memory pages stream across the Submariner tunnel while the VM continues running on the source cluster. The cutover -- where the VM stops on the source and starts on the target -- is nearly instantaneous.
+MTV creates a migration plan that specifies which VMs to move and where. Submariner provides the encrypted network path between clusters. During migration, the VM's memory pages stream across the Submariner tunnel while the VM continues running on the blue cluster. The cutover -- where the VM stops on blue and starts on green -- is nearly instantaneous.
 
 ```
-BLUE CLUSTER (Source)                   GREEN CLUSTER (Target)
+BLUE CLUSTER                            GREEN CLUSTER
 +--------------------------+            +--------------------------+
 | Pod: 10.128.0.0/14      |            | Pod: 10.224.0.0/14       |
 | Svc: 172.30.0.0/16      |<==IPsec==> | Svc: 172.24.0.0/16       |
@@ -48,7 +48,7 @@ BLUE CLUSTER (Source)                   GREEN CLUSTER (Target)
 
 We used two freshly installed OpenShift clusters on GCP, both in the same region:
 
-| | Blue Cluster (Source) | Green Cluster (Target) |
+| | Blue Cluster | Green Cluster |
 |---|---|---|
 | **OpenShift** | 4.21.2 | 4.21.2 |
 | **CNV** | 4.21.1 | 4.21.1 |
@@ -126,7 +126,7 @@ RTT under 500 microseconds. Same-region GCP networking at its best.
 
 ### Phase 3: MTV Cross-Cluster Configuration (~10 minutes)
 
-This phase wires up authentication so the source cluster (blue) can reach the target cluster's (green) API server.
+This phase wires up authentication so the blue cluster can reach the green cluster's API server.
 
 We created:
 1. A **ClusterRole** (`live-migration-role`) with permissions for VMs, DataVolumes, PVCs, StorageClasses, and other migration-related resources -- applied to **both** clusters
@@ -190,7 +190,7 @@ The migration progressed through three stages:
 
 ## The Results
 
-On blue-cluster (source), the VM was stopped:
+On blue-cluster, the VM was stopped:
 
 ```
 $ oc get vm earth-vm -n default
@@ -198,7 +198,7 @@ NAME       AGE   STATUS    READY
 earth-vm   30m   Stopped   False
 ```
 
-On green-cluster (target), the VM was running:
+On green-cluster, the VM was running:
 
 ```
 $ oc get vm earth-vm -n default

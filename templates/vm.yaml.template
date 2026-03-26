@@ -1,0 +1,69 @@
+apiVersion: kubevirt.io/v1
+kind: VirtualMachine
+metadata:
+  name: REPLACE_VM_NAME
+  namespace: REPLACE_NAMESPACE
+  labels:
+    app: REPLACE_VM_NAME
+    migration.forklift.konveyor.io/eligible: "true"
+spec:
+  running: true
+  dataVolumeTemplates:
+    - metadata:
+        name: REPLACE_VM_NAME-data-volume
+      spec:
+        pvc:
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 10Gi
+          storageClassName: standard-csi
+        source:
+          blank: {}
+  template:
+    metadata:
+      labels:
+        kubevirt.io/vm: REPLACE_VM_NAME
+        app: REPLACE_VM_NAME
+    spec:
+      domain:
+        cpu:
+          cores: 1
+        devices:
+          disks:
+            - disk:
+                bus: virtio
+              name: containerdisk
+            - disk:
+                bus: virtio
+              name: cloudinitdisk
+            - disk:
+                bus: virtio
+              name: datadisk
+          interfaces:
+            - name: default
+              masquerade: {}
+        resources:
+          requests:
+            memory: 2Gi
+      networks:
+        - name: default
+          pod: {}
+      volumes:
+        - name: containerdisk
+          containerDisk:
+            image: quay.io/containerdisks/centos-stream:9
+        - name: cloudinitdisk
+          cloudInitNoCloud:
+            userData: |
+              #cloud-config
+              user: centos
+              password: centos
+              chpasswd:
+                expire: false
+              ssh_authorized_keys:
+                - REPLACE_SSH_PUBLIC_KEY
+        - name: datadisk
+          dataVolume:
+            name: REPLACE_VM_NAME-data-volume

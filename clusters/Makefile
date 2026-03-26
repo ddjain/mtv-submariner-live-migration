@@ -10,6 +10,9 @@
 ##   make migrate-vm     Create migration plan and trigger live migration
 ##   make post-check     Run post-migration checklist on target (green)
 ##   make run-e2e        Full pipeline: create-vm -> setup -> pre-check -> migrate -> post-check
+##   make clean-vms      Delete ALL VMs from both clusters
+##   make clean-migrations  Delete ALL Migration/Plan resources
+##   make clean-all      Delete ALL VMs + migrations from both clusters
 ##   make help           Show this help
 ##
 
@@ -77,6 +80,29 @@ delete-vm: ## Delete a VM from source cluster
 	@echo "Deleting VM '$(VM_NAME)' from source cluster..."
 	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete vm $(VM_NAME) -n $(NAMESPACE) --ignore-not-found
 	@echo "Done."
+
+.PHONY: clean-vms
+clean-vms: ## Delete ALL VMs, VMIs, and DataVolumes from both clusters
+	@echo "=== Cleaning VMs from SOURCE (Blue) ==="
+	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete vm --all -n $(NAMESPACE) --ignore-not-found
+	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete vmi --all -n $(NAMESPACE) --ignore-not-found
+	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete dv --all -n $(NAMESPACE) --ignore-not-found
+	@echo ""
+	@echo "=== Cleaning VMs from TARGET (Green) ==="
+	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl delete vm --all -n $(NAMESPACE) --ignore-not-found
+	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl delete vmi --all -n $(NAMESPACE) --ignore-not-found
+	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl delete dv --all -n $(NAMESPACE) --ignore-not-found
+	@echo "Done."
+
+.PHONY: clean-migrations
+clean-migrations: ## Delete ALL Migration and Plan resources from openshift-mtv
+	@echo "=== Cleaning Migrations ==="
+	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete migration --all -n openshift-mtv --ignore-not-found
+	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete plan --all -n openshift-mtv --ignore-not-found
+	@echo "Done."
+
+.PHONY: clean-all
+clean-all: clean-migrations clean-vms ## Delete ALL VMs and migration resources from both clusters
 
 .PHONY: run-e2e
 run-e2e: ## Full e2e: random VM (or VM_NAME_OVERRIDE), create, setup, pre-check, migrate, wait, post-check

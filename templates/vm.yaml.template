@@ -64,16 +64,16 @@ spec:
                 expire: false
               ssh_authorized_keys:
                 - REPLACE_SSH_PUBLIC_KEY
-              # Format and mount the persistent data disk
-              fs_setup:
-                - label: data
-                  filesystem: xfs
-                  device: /dev/vdc
-                  partition: none
+              # Mount the persistent data disk (format only on first boot if needed)
               mounts:
-                - [/dev/vdc, /data, xfs, "defaults,nofail", "0", "2"]
+                - [/dev/vdc, /data, auto, "defaults,nofail", "0", "2"]
               runcmd:
                 - mkdir -p /data
+                # Format /dev/vdc only if it's not already formatted
+                - |
+                  if ! blkid /dev/vdc | grep -q TYPE; then
+                    mkfs.xfs -L data /dev/vdc
+                  fi
                 - mount -a
         - name: datadisk
           dataVolume:

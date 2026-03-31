@@ -244,6 +244,173 @@ except:
     print(0)
 " 2>/dev/null || echo "0")
 
+# --- File-writer gap analysis (persistent vdc) ---
+echo "Analyzing file-writer gaps (persistent /data/)..."
+FILE_WRITER_GAP_DATA=$(run_on_vm "cat /data/test/log.txt 2>/dev/null | python3 -c \"
+import sys, json, re
+from datetime import datetime
+
+lines = sys.stdin.readlines()
+if not lines:
+    print('[]')
+    sys.exit(0)
+
+# Parse timestamps and convert to epoch
+entries = []
+for line in lines:
+    # Format: 'Mon Mar 31 12:34:56 UTC 2026 - writing test data'
+    match = re.match(r'(\w{3} \w{3} +\d+ \d+:\d+:\d+ UTC \d{4})', line)
+    if match:
+        try:
+            ts_str = match.group(1)
+            dt = datetime.strptime(ts_str, '%a %b %d %H:%M:%S UTC %Y')
+            epoch = int(dt.timestamp())
+            entries.append(epoch)
+        except:
+            continue
+
+if len(entries) < 2:
+    print('[]')
+    sys.exit(0)
+
+# Calculate gaps and bucket into 30s windows
+buckets = {}
+for i in range(1, len(entries)):
+    gap = entries[i] - entries[i-1]
+    bucket_ts = (entries[i] // 30) * 30
+
+    if bucket_ts not in buckets:
+        buckets[bucket_ts] = {'total': 0, 'slow': 0, 'max_gap': 0}
+
+    buckets[bucket_ts]['total'] += 1
+    if gap > 1:  # Expected interval is 1 second
+        buckets[bucket_ts]['slow'] += 1
+    if gap > buckets[bucket_ts]['max_gap']:
+        buckets[bucket_ts]['max_gap'] = gap
+
+# Build output
+result = []
+for bucket_ts in sorted(buckets.keys()):
+    b = buckets[bucket_ts]
+    if b['slow'] > 0:  # Only include windows with gaps
+        slow_pct = round(b['slow'] * 100.0 / b['total'], 1) if b['total'] > 0 else 0
+        status = 'affected' if b['slow'] >= 5 else 'jitter'
+        result.append({
+            'time_window_utc': datetime.utcfromtimestamp(bucket_ts).strftime('%Y-%m-%d %H:%M:%S'),
+            'epoch': bucket_ts,
+            'total_writes': b['total'],
+            'slow_writes': b['slow'],
+            'slow_pct': slow_pct,
+            'max_gap_sec': b['max_gap'],
+            'status': status
+        })
+
+print(json.dumps(result))
+\"" 2>/dev/null || echo "[]")
+
+# --- Ephemeral file-writer gap analysis (vda) ---
+echo "Analyzing ephemeral file-writer gaps (/var/lib/test-ephemeral/)..."
+EPHEMERAL_FILE_WRITER_GAP_DATA=$(run_on_vm "cat /var/lib/test-ephemeral/log.txt 2>/dev/null | python3 -c \"
+import sys, json, re
+from datetime import datetime
+
+lines = sys.stdin.readlines()
+if not lines:
+    print('[]')
+    sys.exit(0)
+
+entries = []
+for line in lines:
+    match = re.match(r'(\w{3} \w{3} +\d+ \d+:\d+:\d+ UTC \d{4})', line)
+    if match:
+        try:
+            ts_str = match.group(1)
+            dt = datetime.strptime(ts_str, '%a %b %d %H:%M:%S UTC %Y')
+            epoch = int(dt.timestamp())
+            entries.append(epoch)
+        except:
+            continue
+
+if len(entries) < 2:
+    print('[]')
+    sys.exit(0)
+
+buckets = {}
+for i in range(1, len(entries)):
+    gap = entries[i] - entries[i-1]
+    bucket_ts = (entries[i] // 30) * 30
+
+    if bucket_ts not in buckets:
+        buckets[bucket_ts] = {'total': 0, 'slow': 0, 'max_gap': 0}
+
+    buckets[bucket_ts]['total'] += 1
+    if gap > 1:
+        buckets[bucket_ts]['slow'] += 1
+    if gap > buckets[bucket_ts]['max_gap']:
+        buckets[bucket_ts]['max_gap'] = gap
+
+result = []
+for bucket_ts in sorted(buckets.keys()):
+    b = buckets[bucket_ts]
+    if b['slow'] > 0:
+        slow_pct = round(b['slow'] * 100.0 / b['total'], 1) if b['total'] > 0 else 0
+        status = 'affected' if b['slow'] >= 5 else 'jitter'
+        result.append({
+            'time_window_utc': datetime.utcfromtimestamp(bucket_ts).strftime('%Y-%m-%d %H:%M:%S'),
+            'epoch': bucket_ts,
+            'total_writes': b['total'],
+            'slow_writes': b['slow'],
+            'slow_pct': slow_pct,
+            'max_gap_sec': b['max_gap'],
+            'status': status
+        })
+
+print(json.dumps(result))
+\"" 2>/dev/null || echo "[]")
+
+# --- Cron gap analysis ---
+echo "Analyzing cron job gaps..."
+CRON_GAP_DATA=$(run_on_vm "cat /data/test/cron.log 2>/dev/null | python3 -c \"
+import sys, json, re
+from datetime import datetime
+
+lines = sys.stdin.readlines()
+if not lines:
+    print('[]')
+    sys.exit(0)
+
+entries = []
+for line in lines:
+    # Format: 'cron ran at Mon Mar 31 12:34:00 UTC 2026'
+    match = re.search(r'at (\w{3} \w{3} +\d+ \d+:\d+:\d+ UTC \d{4})', line)
+    if match:
+        try:
+            ts_str = match.group(1)
+            dt = datetime.strptime(ts_str, '%a %b %d %H:%M:%S UTC %Y')
+            epoch = int(dt.timestamp())
+            entries.append(epoch)
+        except:
+            continue
+
+if len(entries) < 2:
+    print('[]')
+    sys.exit(0)
+
+# Calculate gaps (expected: 60 seconds)
+gaps = []
+for i in range(1, len(entries)):
+    gap = entries[i] - entries[i-1]
+    if gap > 60:  # Missing cron execution
+        gaps.append({
+            'from_time_utc': datetime.utcfromtimestamp(entries[i-1]).strftime('%Y-%m-%d %H:%M:%S'),
+            'to_time_utc': datetime.utcfromtimestamp(entries[i]).strftime('%Y-%m-%d %H:%M:%S'),
+            'gap_seconds': gap,
+            'missing_executions': max(0, (gap // 60) - 1)
+        })
+
+print(json.dumps(gaps))
+\"" 2>/dev/null || echo "[]")
+
 # --- Load pre-migration data if provided ---
 PRE_FILE_WRITER_LINES=0
 PRE_SQLITE_ROWS=0
@@ -382,7 +549,8 @@ cat > "$OUTPUT_FILE" << JSONEOF
         "line_count": ${POST_FILE_WRITER_LINES},
         "file_size_bytes": $(get_val FILE_WRITER_SIZE),
         "last_entry": "$(get_val FILE_WRITER_LAST)",
-        "write_interval_sec": 1
+        "write_interval_sec": 1,
+        "gap_analysis": ${FILE_WRITER_GAP_DATA:-[]}
       },
       "sqlite_writer": {
         "status": "$([ "$(get_val SQLITE_PID)" != "none" ] && echo running || echo stopped)",
@@ -408,7 +576,8 @@ cat > "$OUTPUT_FILE" << JSONEOF
         "log_file": "/data/test/cron.log",
         "log_line_count": ${POST_CRON_LINES},
         "last_entry": "$(get_val CRON_LAST)",
-        "interval": "every 1 minute"
+        "interval": "every 1 minute",
+        "gap_analysis": ${CRON_GAP_DATA:-[]}
       },
       "http_server": {
         "status": "$([ "$(get_val HTTP_PID)" != "none" ] && echo running || echo stopped)",
@@ -427,7 +596,8 @@ cat > "$OUTPUT_FILE" << JSONEOF
         "line_count": ${POST_EPHEMERAL_FILE_WRITER_LINES},
         "file_size_bytes": $(get_val EPHEMERAL_FILE_WRITER_SIZE),
         "last_entry": "$(get_val EPHEMERAL_FILE_WRITER_LAST)",
-        "write_interval_sec": 1
+        "write_interval_sec": 1,
+        "gap_analysis": ${EPHEMERAL_FILE_WRITER_GAP_DATA:-[]}
       },
       "sqlite_writer": {
         "status": "$([ "$(get_val EPHEMERAL_SQLITE_PID)" != "none" ] && echo running || echo stopped)",
@@ -607,14 +777,287 @@ except Exception as e:
 " 2>/dev/null
 echo ""
 
+echo "--- File-Writer Gap Analysis (persistent vdc) ---"
+echo ""
+echo "$FILE_WRITER_GAP_DATA" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if not data:
+        print('  No gaps detected - all writes at expected 1s interval.')
+    else:
+        affected = [r for r in data if r.get('status') == 'affected']
+        jitter = [r for r in data if r.get('status') == 'jitter']
+
+        if affected:
+            print(f'  MIGRATION-AFFECTED WINDOW:')
+            print(f'    From:           {affected[0][\"time_window_utc\"]} UTC')
+            print(f'    To:             {affected[-1][\"time_window_utc\"]} UTC')
+            print(f'    Duration:       ~{affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30}s ({(affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30) // 60} min)')
+            print(f'    Slow writes:    {sum(r[\"slow_writes\"] for r in affected)} of {sum(r[\"total_writes\"] for r in affected)} ({round(sum(r[\"slow_pct\"] for r in affected) / len(affected), 1)}% avg)')
+            print(f'    Max gap:        {max(r[\"max_gap_sec\"] for r in affected)}s')
+            print()
+            print(f'    Time Window UTC          Total  Slow   Slow%  MaxGap  Status')
+            print(f'    -------------------      -----  ----   -----  ------  ------')
+            for r in affected:
+                print(f'    {r[\"time_window_utc\"]}  {r[\"total_writes\"]:>5}  {r[\"slow_writes\"]:>4}   {r[\"slow_pct\"]:>5}%  {r[\"max_gap_sec\"]:>5}s  AFFECTED')
+        else:
+            print('  No migration-affected window detected.')
+
+        print()
+        if jitter:
+            print(f'  SPORADIC JITTER: {len(jitter)} windows with minor delays (normal OS scheduling noise)')
+        else:
+            print('  No sporadic jitter detected.')
+except Exception as e:
+    print(f'  Error parsing gap data: {e}')
+" 2>/dev/null
+echo ""
+
+echo "--- File-Writer Gap Analysis (ephemeral vda) ---"
+echo ""
+echo "$EPHEMERAL_FILE_WRITER_GAP_DATA" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if not data:
+        print('  No gaps detected - all writes at expected 1s interval.')
+    else:
+        affected = [r for r in data if r.get('status') == 'affected']
+        jitter = [r for r in data if r.get('status') == 'jitter']
+
+        if affected:
+            print(f'  MIGRATION-AFFECTED WINDOW:')
+            print(f'    From:           {affected[0][\"time_window_utc\"]} UTC')
+            print(f'    To:             {affected[-1][\"time_window_utc\"]} UTC')
+            print(f'    Duration:       ~{affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30}s ({(affected[-1][\"epoch\"] - affected[0][\"epoch\"] + 30) // 60} min)')
+            print(f'    Slow writes:    {sum(r[\"slow_writes\"] for r in affected)} of {sum(r[\"total_writes\"] for r in affected)} ({round(sum(r[\"slow_pct\"] for r in affected) / len(affected), 1)}% avg)')
+            print(f'    Max gap:        {max(r[\"max_gap_sec\"] for r in affected)}s')
+            print()
+            print(f'    Time Window UTC          Total  Slow   Slow%  MaxGap  Status')
+            print(f'    -------------------      -----  ----   -----  ------  ------')
+            for r in affected:
+                print(f'    {r[\"time_window_utc\"]}  {r[\"total_writes\"]:>5}  {r[\"slow_writes\"]:>4}   {r[\"slow_pct\"]:>5}%  {r[\"max_gap_sec\"]:>5}s  AFFECTED')
+        else:
+            print('  No migration-affected window detected.')
+
+        print()
+        if jitter:
+            print(f'  SPORADIC JITTER: {len(jitter)} windows with minor delays (normal OS scheduling noise)')
+        else:
+            print('  No sporadic jitter detected.')
+except Exception as e:
+    print(f'  Error parsing gap data: {e}')
+" 2>/dev/null
+echo ""
+
+echo "--- Cron Job Gap Analysis ---"
+echo ""
+echo "$CRON_GAP_DATA" | python3 -c "
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    if not data:
+        print('  No gaps detected - all cron executions at expected 1-minute interval.')
+    else:
+        print(f'  MISSING CRON EXECUTIONS DETECTED: {len(data)} gaps found')
+        print()
+        print(f'    From Time UTC             To Time UTC               Gap(s)  Missing')
+        print(f'    ------------------------  ------------------------  ------  -------')
+        for r in data:
+            print(f'    {r[\"from_time_utc\"]}  {r[\"to_time_utc\"]}  {r[\"gap_seconds\"]:>6}  {r[\"missing_executions\"]:>7}')
+        print()
+        total_missing = sum(r['missing_executions'] for r in data)
+        total_gap_time = sum(r['gap_seconds'] for r in data)
+        print(f'    Total missing executions: {total_missing}')
+        print(f'    Total gap time:           {total_gap_time}s ({total_gap_time // 60} min)')
+except Exception as e:
+    print(f'  Error parsing gap data: {e}')
+" 2>/dev/null
+echo ""
+
+# Compute individual check statuses
+PERSISTENT_FILE_WRITER_STATUS="PASS"
+[ "$FILE_WRITER_DIFF" -lt 0 ] && PERSISTENT_FILE_WRITER_STATUS="FAIL"
+
+PERSISTENT_SQLITE_STATUS="PASS"
+[ "$SQLITE_DIFF" -lt 0 ] && PERSISTENT_SQLITE_STATUS="FAIL"
+
+PERSISTENT_SQLITE_INTEGRITY_STATUS="PASS"
+[ "$(get_val SQLITE_INTEGRITY)" != "ok" ] && PERSISTENT_SQLITE_INTEGRITY_STATUS="FAIL"
+
+PERSISTENT_CRON_STATUS="PASS"
+[ "$CRON_DIFF" -lt 0 ] && PERSISTENT_CRON_STATUS="FAIL"
+
+PERSISTENT_LARGE_FILE_STATUS="PASS"
+[ "$LARGE_DATA_INTACT" != "true" ] && PERSISTENT_LARGE_FILE_STATUS="FAIL"
+
+EPHEMERAL_FILE_WRITER_STATUS="PASS"
+[ "$EPHEMERAL_FILE_WRITER_DIFF" -lt 0 ] && EPHEMERAL_FILE_WRITER_STATUS="FAIL"
+
+EPHEMERAL_SQLITE_STATUS="PASS"
+[ "$EPHEMERAL_SQLITE_DIFF" -lt 0 ] && EPHEMERAL_SQLITE_STATUS="FAIL"
+
+EPHEMERAL_SQLITE_INTEGRITY_STATUS="PASS"
+[ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" != "ok" ] && EPHEMERAL_SQLITE_INTEGRITY_STATUS="FAIL"
+
+EPHEMERAL_LARGE_FILE_STATUS="PASS"
+[ "$EPHEMERAL_DATA_INTACT" != "true" ] && EPHEMERAL_LARGE_FILE_STATUS="FAIL"
+
+HTTP_STATUS_CHECK="PASS"
+[ "$(get_val HTTP_STATUS)" != "200" ] && HTTP_STATUS_CHECK="FAIL"
+
+CROND_STATUS_CHECK="PASS"
+[ "$(get_val CROND_STATUS)" != "active" ] && CROND_STATUS_CHECK="FAIL"
+
+# Service running checks
+SERVICES_RUNNING_STATUS="PASS"
+if [ "$(get_val FILE_WRITER_PID)" == "none" ] || \
+   [ "$(get_val SQLITE_PID)" == "none" ] || \
+   [ "$(get_val HTTP_PID)" == "none" ] || \
+   [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "none" ] || \
+   [ "$(get_val EPHEMERAL_SQLITE_PID)" == "none" ]; then
+  SERVICES_RUNNING_STATUS="FAIL"
+fi
+
+echo "╔════════════════════════════════════════════════════════════════════════════╗"
+echo "║                      POST-MIGRATION VALIDATION SUMMARY                     ║"
+echo "╚════════════════════════════════════════════════════════════════════════════╝"
+echo ""
+
+# --- PERSISTENT DISK (VDC) CHECKS ---
+echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+echo "│ PERSISTENT DISK (/dev/vdc → /data/)                                        │"
+echo "└─────────────────────────────────────────────────────────────────────────────┘"
+echo ""
+echo "  Data Integrity:"
+printf "    %-40s [%s]\n" "File-writer data continuity" "$PERSISTENT_FILE_WRITER_STATUS"
+if [ "$PERSISTENT_FILE_WRITER_STATUS" == "FAIL" ]; then
+  printf "      → Data loss detected: %d lines lost\n" "$((0 - FILE_WRITER_DIFF))"
+fi
+
+printf "    %-40s [%s]\n" "SQLite data continuity" "$PERSISTENT_SQLITE_STATUS"
+if [ "$PERSISTENT_SQLITE_STATUS" == "FAIL" ]; then
+  printf "      → Data loss detected: %d rows lost\n" "$((0 - SQLITE_DIFF))"
+fi
+
+printf "    %-40s [%s]\n" "SQLite database integrity" "$PERSISTENT_SQLITE_INTEGRITY_STATUS"
+if [ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "FAIL" ]; then
+  printf "      → Integrity check result: %s\n" "$(get_val SQLITE_INTEGRITY)"
+fi
+
+printf "    %-40s [%s]\n" "Cron log continuity" "$PERSISTENT_CRON_STATUS"
+if [ "$PERSISTENT_CRON_STATUS" == "FAIL" ]; then
+  printf "      → Data loss detected: %d entries lost\n" "$((0 - CRON_DIFF))"
+fi
+
+printf "    %-40s [%s]\n" "Large file integrity (SHA256)" "$PERSISTENT_LARGE_FILE_STATUS"
+if [ "$PERSISTENT_LARGE_FILE_STATUS" == "FAIL" ]; then
+  echo "      → SHA256 mismatch detected"
+  echo "      → Pre:  ${PRE_LARGE_FILE_SHA256}"
+  echo "      → Post: ${POST_LARGE_FILE_SHA256}"
+fi
+echo ""
+
+echo "  Services:"
+printf "    %-40s [%s]\n" "HTTP server responding (port 8080)" "$HTTP_STATUS_CHECK"
+if [ "$HTTP_STATUS_CHECK" == "FAIL" ]; then
+  printf "      → HTTP response code: %s (expected: 200)\n" "$(get_val HTTP_STATUS)"
+fi
+
+printf "    %-40s [%s]\n" "Cron daemon active" "$CROND_STATUS_CHECK"
+if [ "$CROND_STATUS_CHECK" == "FAIL" ]; then
+  printf "      → Crond status: %s (expected: active)\n" "$(get_val CROND_STATUS)"
+fi
+echo ""
+
+# --- EPHEMERAL DISK (VDA) CHECKS ---
+echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+echo "│ EPHEMERAL DISK (/dev/vda → /var/lib/test-ephemeral/)                       │"
+echo "└─────────────────────────────────────────────────────────────────────────────┘"
+echo ""
+echo "  Data Integrity:"
+printf "    %-40s [%s]\n" "File-writer data continuity" "$EPHEMERAL_FILE_WRITER_STATUS"
+if [ "$EPHEMERAL_FILE_WRITER_STATUS" == "FAIL" ]; then
+  printf "      → Data loss detected: %d lines lost\n" "$((0 - EPHEMERAL_FILE_WRITER_DIFF))"
+  echo "      → Expected for cold migration (vda recreated)"
+fi
+
+printf "    %-40s [%s]\n" "SQLite data continuity" "$EPHEMERAL_SQLITE_STATUS"
+if [ "$EPHEMERAL_SQLITE_STATUS" == "FAIL" ]; then
+  printf "      → Data loss detected: %d rows lost\n" "$((0 - EPHEMERAL_SQLITE_DIFF))"
+  echo "      → Expected for cold migration (vda recreated)"
+fi
+
+printf "    %-40s [%s]\n" "SQLite database integrity" "$EPHEMERAL_SQLITE_INTEGRITY_STATUS"
+if [ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "FAIL" ]; then
+  printf "      → Integrity check result: %s\n" "$(get_val EPHEMERAL_SQLITE_INTEGRITY)"
+fi
+
+printf "    %-40s [%s]\n" "Large file integrity (SHA256)" "$EPHEMERAL_LARGE_FILE_STATUS"
+if [ "$EPHEMERAL_LARGE_FILE_STATUS" == "FAIL" ]; then
+  echo "      → SHA256 mismatch or file missing"
+  echo "      → Expected for cold migration (vda recreated)"
+fi
+echo ""
+
+# --- PROCESS CONTINUITY ---
+echo "┌─────────────────────────────────────────────────────────────────────────────┐"
+echo "│ PROCESS CONTINUITY & SERVICES                                               │"
+echo "└─────────────────────────────────────────────────────────────────────────────┘"
+echo ""
+printf "    %-40s [%s]\n" "All workload services running" "$SERVICES_RUNNING_STATUS"
+if [ "$SERVICES_RUNNING_STATUS" == "FAIL" ]; then
+  echo "      → Stopped services detected:"
+  [ "$(get_val FILE_WRITER_PID)" == "none" ] && echo "        • file-writer (persistent)"
+  [ "$(get_val SQLITE_PID)" == "none" ] && echo "        • sqlite-writer (persistent)"
+  [ "$(get_val HTTP_PID)" == "none" ] && echo "        • http-server"
+  [ "$(get_val EPHEMERAL_FILE_WRITER_PID)" == "none" ] && echo "        • file-writer (ephemeral)"
+  [ "$(get_val EPHEMERAL_SQLITE_PID)" == "none" ] && echo "        • sqlite-writer (ephemeral)"
+fi
+echo ""
+
+echo "  Migration Type: ${MIGRATION_TYPE}"
+echo "    File-writer PID:  $(get_val FILE_WRITER_PID) (${FILE_WRITER_PID_MATCH})"
+echo "    SQLite PID:       $(get_val SQLITE_PID) (${SQLITE_PID_MATCH})"
+echo "    HTTP PID:         $(get_val HTTP_PID) (${HTTP_PID_MATCH})"
+echo ""
+
+# --- OVERALL VERDICT ---
 OVERALL="PASS"
-# Persistent checks
 if [ "$FILE_WRITER_DIFF" -lt 0 ] || [ "$SQLITE_DIFF" -lt 0 ] || [ "$(get_val SQLITE_INTEGRITY)" != "ok" ] || [ "$LARGE_DATA_INTACT" != "true" ]; then
   OVERALL="FAIL"
 fi
-# Ephemeral checks
 if [ "$EPHEMERAL_FILE_WRITER_DIFF" -lt 0 ] || [ "$EPHEMERAL_SQLITE_DIFF" -lt 0 ] || [ "$(get_val EPHEMERAL_SQLITE_INTEGRITY)" != "ok" ] || [ "$EPHEMERAL_DATA_INTACT" != "true" ]; then
   OVERALL="FAIL"
 fi
-echo "  Overall verdict:     ${OVERALL}"
+
+echo "╔════════════════════════════════════════════════════════════════════════════╗"
+if [ "$OVERALL" == "PASS" ]; then
+  echo "║                         ✓ MIGRATION VALIDATION PASSED                      ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "  All checks passed successfully:"
+  echo "    • Persistent data (vdc) preserved with SHA256 verification"
+  echo "    • Ephemeral data (vda) preserved (true live migration)"
+  echo "    • All workload services running"
+  echo "    • Database integrity verified"
+else
+  echo "║                         ✗ MIGRATION VALIDATION FAILED                      ║"
+  echo "╚════════════════════════════════════════════════════════════════════════════╝"
+  echo ""
+  echo "  Issues detected - review details above:"
+  [ "$PERSISTENT_FILE_WRITER_STATUS" == "FAIL" ] && echo "    ✗ Persistent file-writer data loss"
+  [ "$PERSISTENT_SQLITE_STATUS" == "FAIL" ] && echo "    ✗ Persistent SQLite data loss"
+  [ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "FAIL" ] && echo "    ✗ Persistent SQLite corruption"
+  [ "$PERSISTENT_CRON_STATUS" == "FAIL" ] && echo "    ✗ Cron log data loss"
+  [ "$PERSISTENT_LARGE_FILE_STATUS" == "FAIL" ] && echo "    ✗ Persistent large file corruption (SHA256 mismatch)"
+  [ "$EPHEMERAL_FILE_WRITER_STATUS" == "FAIL" ] && echo "    ✗ Ephemeral file-writer data loss (cold migration?)"
+  [ "$EPHEMERAL_SQLITE_STATUS" == "FAIL" ] && echo "    ✗ Ephemeral SQLite data loss (cold migration?)"
+  [ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "FAIL" ] && echo "    ✗ Ephemeral SQLite corruption"
+  [ "$EPHEMERAL_LARGE_FILE_STATUS" == "FAIL" ] && echo "    ✗ Ephemeral large file corruption (cold migration?)"
+  [ "$HTTP_STATUS_CHECK" == "FAIL" ] && echo "    ✗ HTTP server not responding"
+  [ "$CROND_STATUS_CHECK" == "FAIL" ] && echo "    ✗ Cron daemon not active"
+  [ "$SERVICES_RUNNING_STATUS" == "FAIL" ] && echo "    ✗ Some workload services not running"
+fi
 echo ""

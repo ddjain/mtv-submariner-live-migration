@@ -19,6 +19,8 @@ LOCAL_SSH_OPTS_DEFAULT="-o StrictHostKeyChecking=accept-new"
 LOCAL_SSH_OPTS=""
 SSH_READY_TIMEOUT=600
 STABILIZE_WAIT=30
+LARGE_DATA_SIZE_MB=500
+LARGE_DATA_SIZE_MB_EPHEMERAL=100
 
 usage() {
   cat <<EOF
@@ -39,8 +41,10 @@ Optional:
   --output-dir DIR           Generated manifests dir (default: scripts/generated)
   --report-dir DIR           JSON reports dir (default: scripts/reports)
   --local-ssh-opts OPTS      Passed to virtctl ssh (default: -o StrictHostKeyChecking=accept-new)
-  --ssh-ready-timeout SEC    Max seconds to wait for guest SSH before setup (default: 600)
-  --stabilize-wait SEC       Seconds to wait after workload setup before pre-check (default: 30)
+  --ssh-ready-timeout SEC            Max seconds to wait for guest SSH before setup (default: 600)
+  --stabilize-wait SEC               Seconds to wait after workload setup before pre-check (default: 30)
+  --large-data-size-mb MB            Size of persistent test data file in MB (default: 500)
+  --large-data-size-mb-ephemeral MB  Size of ephemeral test data file in MB (default: 100)
 
 EOF
   exit 1
@@ -57,11 +61,13 @@ while [[ $# -gt 0 ]]; do
     --template-dir)      TEMPLATE_DIR="$2"; shift 2 ;;
     --output-dir)        GENERATED_DIR="$2"; shift 2 ;;
     --report-dir)        REPORT_DIR="$2"; shift 2 ;;
-    --local-ssh-opts)       LOCAL_SSH_OPTS="$2"; shift 2 ;;
-    --ssh-ready-timeout)    SSH_READY_TIMEOUT="$2"; shift 2 ;;
-    --stabilize-wait)       STABILIZE_WAIT="$2"; shift 2 ;;
-    -h|--help)              usage ;;
-    *)                   echo "Unknown option: $1"; usage ;;
+    --local-ssh-opts)                 LOCAL_SSH_OPTS="$2"; shift 2 ;;
+    --ssh-ready-timeout)              SSH_READY_TIMEOUT="$2"; shift 2 ;;
+    --stabilize-wait)                 STABILIZE_WAIT="$2"; shift 2 ;;
+    --large-data-size-mb)             LARGE_DATA_SIZE_MB="$2"; shift 2 ;;
+    --large-data-size-mb-ephemeral)   LARGE_DATA_SIZE_MB_EPHEMERAL="$2"; shift 2 ;;
+    -h|--help)                        usage ;;
+    *)                                echo "Unknown option: $1"; usage ;;
   esac
 done
 
@@ -149,6 +155,8 @@ step_banner "[2/6] SETUP WORKLOADS"
   --ssh-key "$SSH_KEY" \
   --ssh-user "$SSH_USER" \
   --ssh-ready-timeout "$SSH_READY_TIMEOUT" \
+  --large-data-size-mb "$LARGE_DATA_SIZE_MB" \
+  --large-data-size-mb-ephemeral "$LARGE_DATA_SIZE_MB_EPHEMERAL" \
   --local-ssh-opts "$LOCAL_SSH_OPTS"
 
 echo ""
@@ -163,7 +171,8 @@ step_banner "[3/6] PRE-MIGRATION CHECK"
   --ssh-key "$SSH_KEY" \
   --ssh-user "$SSH_USER" \
   --output-dir "$REPORT_DIR" \
-  --local-ssh-opts "$LOCAL_SSH_OPTS"
+  --local-ssh-opts "$LOCAL_SSH_OPTS" \
+  --ssh-ready-timeout 300
 
 PRE_FILE="$(ls -t "${REPORT_DIR}/pre-migration-${VM_NAME}-"*.json 2>/dev/null | head -1 || true)"
 [[ -n "$PRE_FILE" ]] || { echo "ERROR: Could not find pre-migration JSON for ${VM_NAME}"; exit 1; }
@@ -212,7 +221,8 @@ step_banner "[6/6] POST-MIGRATION CHECK (target cluster)"
   --ssh-user "$SSH_USER" \
   --output-dir "$REPORT_DIR" \
   --pre-migration-file "$PRE_FILE" \
-  --local-ssh-opts "$LOCAL_SSH_OPTS"
+  --local-ssh-opts "$LOCAL_SSH_OPTS" \
+  --ssh-ready-timeout "$SSH_READY_TIMEOUT"
 
 echo ""
 echo "================================================================"

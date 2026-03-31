@@ -64,6 +64,17 @@ spec:
                 expire: false
               ssh_authorized_keys:
                 - REPLACE_SSH_PUBLIC_KEY
+              # Format and mount the persistent data disk
+              fs_setup:
+                - label: data
+                  filesystem: xfs
+                  device: /dev/vdc
+                  partition: none
+              mounts:
+                - [/dev/vdc, /data, xfs, "defaults,nofail", "0", "2"]
+              runcmd:
+                - mkdir -p /data
+                - mount -a
         - name: datadisk
           dataVolume:
             name: REPLACE_VM_NAME-data-volume

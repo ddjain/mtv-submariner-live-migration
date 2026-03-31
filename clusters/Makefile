@@ -45,6 +45,10 @@ SSH_READY_TIMEOUT_EFFECTIVE := $(or $(SSH_READY_TIMEOUT),600)
 # Seconds to wait after workload setup before pre-migration check (default 30)
 STABILIZE_WAIT ?= 120
 
+# Large data generation settings (default: 500MB)
+LARGE_DATA_SIZE_MB ?= 500
+LARGE_DATA_SIZE_MB_EPHEMERAL ?= 100
+
 SCRIPTS_DIR   := $(CURDIR)/scripts
 TEMPLATE_DIR  := $(CURDIR)/../templates
 GENERATED_DIR := $(CURDIR)/scripts/generated
@@ -115,6 +119,8 @@ run-e2e: ## Full e2e: random VM (or VM_NAME_OVERRIDE), create, setup, pre-check,
 		--template-dir $(TEMPLATE_DIR) \
 		--output-dir $(GENERATED_DIR) \
 		--report-dir $(OUTPUT_DIR) \
+		--large-data-size-mb $(LARGE_DATA_SIZE_MB) \
+		--large-data-size-mb-ephemeral $(LARGE_DATA_SIZE_MB_EPHEMERAL) \
 		$(if $(VM_NAME_OVERRIDE),--vm $(VM_NAME_OVERRIDE),) \
 		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",) \
 		--ssh-ready-timeout $(SSH_READY_TIMEOUT_EFFECTIVE) \
@@ -133,6 +139,8 @@ setup: ## Setup workloads on source cluster VM
 		--ssh-key $(SSH_KEY) \
 		--ssh-user $(SSH_USER) \
 		--ssh-ready-timeout $(SSH_READY_TIMEOUT_EFFECTIVE) \
+		--large-data-size-mb $(LARGE_DATA_SIZE_MB) \
+		--large-data-size-mb-ephemeral $(LARGE_DATA_SIZE_MB_EPHEMERAL) \
 		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",)
 
 .PHONY: pre-check
@@ -237,8 +245,9 @@ help: ## Show this help
 	@echo "Override variables: VM_NAME=x NAMESPACE=x SSH_KEY=x SSH_USER=x"
 	@echo "  LOCAL_SSH_OPTS='-o StrictHostKeyChecking=accept-new' for unattended SSH on setup/pre/post-check"
 	@echo "  VM_NAME_OVERRIDE=name for make run-e2e (fixed VM instead of random)"
-	@echo "  SSH_READY_TIMEOUT=900  seconds to wait for guest SSH after VM Ready (default 600)"
-	@echo "  STABILIZE_WAIT=60      seconds to wait after workload setup before pre-check (default 30)"
+	@echo "  SSH_READY_TIMEOUT=900     seconds to wait for guest SSH after VM Ready (default 600)"
+	@echo "  STABILIZE_WAIT=60         seconds to wait after workload setup before pre-check (default 120)"
+	@echo "  LARGE_DATA_SIZE_MB=1000   size of test data file in MB (default 500)"
 	@echo ""
 
 .DEFAULT_GOAL := help

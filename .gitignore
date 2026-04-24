@@ -40,3 +40,6 @@ clusters/scripts/generated/
 
 # Generated reports
 clusters/scripts/reports/
+
+# Filled chaos test specs / run reports (skeletons live under docs/templates/)
+local/testing/

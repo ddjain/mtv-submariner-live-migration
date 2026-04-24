@@ -49,6 +49,15 @@ STABILIZE_WAIT ?= 120
 LARGE_DATA_SIZE_MB ?= 500
 LARGE_DATA_SIZE_MB_EPHEMERAL ?= 100
 
+# Pause before migration step for manual intervention (default: false)
+PAUSE_BEFORE_MIGRATION ?= false
+
+# Chaos scenario label for migration metrics (default: empty = no chaos)
+CHAOS_SCENARIO ?=
+
+# Skip Prometheus/VMIM metrics collection after migration (default: false = collect)
+SKIP_PROMETHEUS_METRICS ?= false
+
 SCRIPTS_DIR   := $(CURDIR)/scripts
 TEMPLATE_DIR  := $(CURDIR)/../templates
 GENERATED_DIR := $(CURDIR)/scripts/generated
@@ -124,7 +133,10 @@ run-e2e: ## Full e2e: random VM (or VM_NAME_OVERRIDE), create, setup, pre-check,
 		$(if $(VM_NAME_OVERRIDE),--vm $(VM_NAME_OVERRIDE),) \
 		$(if $(LOCAL_SSH_OPTS),--local-ssh-opts "$(LOCAL_SSH_OPTS)",) \
 		--ssh-ready-timeout $(SSH_READY_TIMEOUT_EFFECTIVE) \
-		--stabilize-wait $(STABILIZE_WAIT)
+		--stabilize-wait $(STABILIZE_WAIT) \
+		$(if $(filter true,$(PAUSE_BEFORE_MIGRATION)),--pause-before-migration,) \
+		$(if $(filter true,$(SKIP_PROMETHEUS_METRICS)),--skip-prometheus-metrics,) \
+		$(if $(CHAOS_SCENARIO),--chaos-scenario "$(CHAOS_SCENARIO)",)
 
 # ──────────────────────────────────────────────
 # Validation & Workloads
@@ -245,9 +257,12 @@ help: ## Show this help
 	@echo "Override variables: VM_NAME=x NAMESPACE=x SSH_KEY=x SSH_USER=x"
 	@echo "  LOCAL_SSH_OPTS='-o StrictHostKeyChecking=accept-new' for unattended SSH on setup/pre/post-check"
 	@echo "  VM_NAME_OVERRIDE=name for make run-e2e (fixed VM instead of random)"
-	@echo "  SSH_READY_TIMEOUT=900     seconds to wait for guest SSH after VM Ready (default 600)"
-	@echo "  STABILIZE_WAIT=60         seconds to wait after workload setup before pre-check (default 120)"
-	@echo "  LARGE_DATA_SIZE_MB=1000   size of test data file in MB (default 500)"
+	@echo "  SSH_READY_TIMEOUT=900           seconds to wait for guest SSH after VM Ready (default 600)"
+	@echo "  STABILIZE_WAIT=60               seconds to wait after workload setup before pre-check (default 120)"
+	@echo "  LARGE_DATA_SIZE_MB=1000         size of test data file in MB (default 500)"
+	@echo "  PAUSE_BEFORE_MIGRATION=true     pause before migration step for manual intervention (default: false)"
+	@echo "  CHAOS_SCENARIO=name             label for chaos test in migration-metrics JSON (default: empty)"
+	@echo "  SKIP_PROMETHEUS_METRICS=true     skip Prometheus/VMIM metrics after migration (default: false)"
 	@echo ""
 
 .DEFAULT_GOAL := help

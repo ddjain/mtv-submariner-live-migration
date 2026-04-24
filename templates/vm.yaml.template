@@ -26,6 +26,7 @@ spec:
       labels:
         kubevirt.io/vm: REPLACE_VM_NAME
         app: REPLACE_VM_NAME
+        vm-name: REPLACE_VM_NAME
     spec:
       domain:
         cpu:

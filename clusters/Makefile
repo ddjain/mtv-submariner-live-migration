@@ -43,7 +43,7 @@ SSH_READY_TIMEOUT ?= 600
 SSH_READY_TIMEOUT_EFFECTIVE := $(or $(SSH_READY_TIMEOUT),600)
 
 # Seconds to wait after workload setup before pre-migration check (default 30)
-STABILIZE_WAIT ?= 120
+STABILIZE_WAIT ?= 30
 
 # Large data generation settings (default: 500MB)
 LARGE_DATA_SIZE_MB ?= 500
@@ -150,6 +150,7 @@ setup: ## Setup workloads on source cluster VM
 		--namespace $(NAMESPACE) \
 		--ssh-key $(SSH_KEY) \
 		--ssh-user $(SSH_USER) \
+		--template-dir $(TEMPLATE_DIR) \
 		--ssh-ready-timeout $(SSH_READY_TIMEOUT_EFFECTIVE) \
 		--large-data-size-mb $(LARGE_DATA_SIZE_MB) \
 		--large-data-size-mb-ephemeral $(LARGE_DATA_SIZE_MB_EPHEMERAL) \

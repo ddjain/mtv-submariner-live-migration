@@ -16,6 +16,7 @@ NAMESPACE="default"
 START_EPOCH=""
 END_EPOCH=""
 OUTPUT_FILE=""
+CHAOS_SCENARIO=""
 
 usage() {
   cat <<EOF
@@ -45,6 +46,7 @@ while [[ $# -gt 0 ]]; do
     --start-epoch)       START_EPOCH="$2"; shift 2 ;;
     --end-epoch)         END_EPOCH="$2"; shift 2 ;;
     --output-file)       OUTPUT_FILE="$2"; shift 2 ;;
+    --chaos-scenario)    CHAOS_SCENARIO="$2"; shift 2 ;;
     -h|--help)           usage ;;
     *)                   echo "Unknown option: $1"; usage ;;
   esac
@@ -300,6 +302,9 @@ VMIM_FINAL=$(echo "$VMIM_EXTRACTED" | jq --argjson dd "$DERIVED_DURATIONS" '. + 
 # ──────────────────────────────────────────────
 
 RESULT=$(jq -n \
+  --arg vm "$VM_NAME" \
+  --arg ns "$NAMESPACE" \
+  --arg chaos "$CHAOS_SCENARIO" \
   --argjson qstart "$QUERY_START" \
   --argjson qend "$QUERY_END" \
   --argjson dirty "$DIRTY_SUMMARY" \
@@ -326,6 +331,9 @@ RESULT=$(jq -n \
   --argjson mtv_st "$MTV_STATUS" \
   --argjson vmim "$VMIM_FINAL" \
   '{
+    vm_name: $vm,
+    namespace: $ns,
+    chaos_scenario: $chaos,
     query_window: { start_epoch: $qstart, end_epoch: $qend },
     migration_transfer: {
       dirty_memory_rate_bytes: $dirty,

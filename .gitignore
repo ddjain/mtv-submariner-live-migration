@@ -19,6 +19,9 @@ metadata.json
 kubeconfig
 kubeconfig-*
 
+# krknctl temp kubeconfig files
+**/krknctl-kubeconfig-*
+
 # Terraform generated files
 *.tfstate
 *.tfstate.backup

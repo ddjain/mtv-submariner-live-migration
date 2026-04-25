@@ -93,6 +93,9 @@ fi
 
 mkdir -p "$GENERATED_DIR" "$REPORT_DIR"
 
+# Per-job report folder: reports/<scenario>-<vm>-<timestamp>/ or reports/<vm>-<timestamp>/
+RUN_TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+
 step_banner() {
   echo ""
   echo "================================================================"
@@ -130,11 +133,19 @@ if [[ -z "$VM_NAME" ]]; then
   VM_NAME="${prefixes[$((RANDOM % ${#prefixes[@]}))]}-${names[$((RANDOM % ${#names[@]}))]}-vm"
 fi
 
+if [[ -n "$CHAOS_SCENARIO" ]]; then
+  RUN_REPORT_DIR="${REPORT_DIR}/${CHAOS_SCENARIO}-${VM_NAME}-${RUN_TIMESTAMP}"
+else
+  RUN_REPORT_DIR="${REPORT_DIR}/${VM_NAME}-${RUN_TIMESTAMP}"
+fi
+mkdir -p "$RUN_REPORT_DIR"
+
 echo ""
 echo "================================================================"
 echo "  E2E Migration Pipeline"
 echo "  VM_NAME:    ${VM_NAME}"
 echo "  Namespace:  ${NAMESPACE}"
+echo "  Report Dir: ${RUN_REPORT_DIR}"
 echo "================================================================"
 echo ""
 
@@ -178,6 +189,7 @@ step_banner "[2/6] SETUP WORKLOADS"
   --namespace "$NAMESPACE" \
   --ssh-key "$SSH_KEY" \
   --ssh-user "$SSH_USER" \
+  --template-dir "$TEMPLATE_DIR" \
   --ssh-ready-timeout "$SSH_READY_TIMEOUT" \
   --large-data-size-mb "$LARGE_DATA_SIZE_MB" \
   --large-data-size-mb-ephemeral "$LARGE_DATA_SIZE_MB_EPHEMERAL" \
@@ -194,11 +206,12 @@ step_banner "[3/6] PRE-MIGRATION CHECK"
   --namespace "$NAMESPACE" \
   --ssh-key "$SSH_KEY" \
   --ssh-user "$SSH_USER" \
-  --output-dir "$REPORT_DIR" \
+  --output-dir "$RUN_REPORT_DIR" \
   --local-ssh-opts "$LOCAL_SSH_OPTS" \
-  --ssh-ready-timeout 300
+  --ssh-ready-timeout 300 \
+  --chaos-scenario "$CHAOS_SCENARIO"
 
-PRE_FILE="$(ls -t "${REPORT_DIR}/pre-migration-${VM_NAME}-"*.json 2>/dev/null | head -1 || true)"
+PRE_FILE="$(ls -t "${RUN_REPORT_DIR}/pre-migration-${VM_NAME}-"*.json 2>/dev/null | head -1 || true)"
 [[ -n "$PRE_FILE" ]] || { echo "ERROR: Could not find pre-migration JSON for ${VM_NAME}"; exit 1; }
 echo "Using pre-migration baseline: ${PRE_FILE}"
 
@@ -240,6 +253,13 @@ step_banner "[4/6] MIGRATE VM"
   --namespace "$NAMESPACE" \
   --template-dir "$TEMPLATE_DIR" \
   --output-dir "$GENERATED_DIR"
+
+echo "  Copying generated manifests to report folder..."
+for f in "${GENERATED_DIR}/${VM_NAME}-vm.yaml" \
+         "${GENERATED_DIR}/${VM_NAME}-migration-plan.yaml" \
+         "${GENERATED_DIR}/${VM_NAME}-migration.yaml"; do
+  [[ -f "$f" ]] && cp "$f" "$RUN_REPORT_DIR/"
+done
 
 step_banner "[5/6] WAIT FOR MIGRATION (up to 60 checks, 10s apart)"
 MAX_ATTEMPTS=60
@@ -378,7 +398,7 @@ POD_RESTART_DIFF="$(jq -n \
 ' 2>/dev/null || echo '[]')"
 
 METRICS_TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
-MIGRATION_METRICS_FILE="${REPORT_DIR}/migration-metrics-${VM_NAME}-${METRICS_TIMESTAMP}.json"
+MIGRATION_METRICS_FILE="${RUN_REPORT_DIR}/migration-metrics-${VM_NAME}-${METRICS_TIMESTAMP}.json"
 
 jq -n \
   --arg vm "$VM_NAME" \
@@ -409,7 +429,7 @@ echo "  Migration metrics saved to: ${MIGRATION_METRICS_FILE}"
 # --- Prometheus + VMIM Metrics (enabled by default) ---
 if [[ "$SKIP_PROMETHEUS_METRICS" != "true" ]]; then
   MIGRATION_END_TIME=$(date +%s)
-  PROM_METRICS_FILE="${REPORT_DIR}/prometheus-metrics-${VM_NAME}-${METRICS_TIMESTAMP}.json"
+  PROM_METRICS_FILE="${RUN_REPORT_DIR}/prometheus-metrics-${VM_NAME}-${METRICS_TIMESTAMP}.json"
   echo "  Capturing Prometheus metrics and VMIM data..."
   if "${SCRIPT_DIR}/capture-prometheus-metrics.sh" \
       --source-kubeconfig "$SOURCE_KUBECONFIG" \
@@ -417,7 +437,8 @@ if [[ "$SKIP_PROMETHEUS_METRICS" != "true" ]]; then
       --namespace "$NAMESPACE" \
       --start-epoch "$MIGRATION_START_TIME" \
       --end-epoch "$MIGRATION_END_TIME" \
-      --output-file "$PROM_METRICS_FILE"; then
+      --output-file "$PROM_METRICS_FILE" \
+      --chaos-scenario "$CHAOS_SCENARIO"; then
     jq -s '.[0] * {prometheus: .[1]}' \
       "$MIGRATION_METRICS_FILE" "$PROM_METRICS_FILE" > "${MIGRATION_METRICS_FILE}.tmp" \
       && mv "${MIGRATION_METRICS_FILE}.tmp" "$MIGRATION_METRICS_FILE"
@@ -443,13 +464,15 @@ step_banner "[6/6] POST-MIGRATION CHECK (target cluster)"
   --namespace "$NAMESPACE" \
   --ssh-key "$SSH_KEY" \
   --ssh-user "$SSH_USER" \
-  --output-dir "$REPORT_DIR" \
+  --output-dir "$RUN_REPORT_DIR" \
   --pre-migration-file "$PRE_FILE" \
   --local-ssh-opts "$LOCAL_SSH_OPTS" \
-  --ssh-ready-timeout "$SSH_READY_TIMEOUT"
+  --ssh-ready-timeout "$SSH_READY_TIMEOUT" \
+  --chaos-scenario "$CHAOS_SCENARIO"
 
 echo ""
 echo "================================================================"
 echo "  E2E completed for VM: ${VM_NAME}"
+echo "  Reports: ${RUN_REPORT_DIR}"
 echo "================================================================"
 echo ""

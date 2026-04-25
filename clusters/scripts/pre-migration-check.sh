@@ -25,6 +25,7 @@ OUTPUT_DIR="${SCRIPT_DIR}/reports"
 LOCAL_SSH_OPTS=""
 SSH_READY_TIMEOUT=300
 SSH_READY_INTERVAL=10
+CHAOS_SCENARIO=""
 
 usage() {
   echo "Usage: $0 --kubeconfig <path> --vm <name> [--namespace <ns>] [--ssh-key <path>] [--ssh-user <user>] [--output-dir <dir>] [--local-ssh-opts <opts>] [--ssh-ready-timeout SEC]"
@@ -41,6 +42,7 @@ while [[ $# -gt 0 ]]; do
     --output-dir)      OUTPUT_DIR="$2"; shift 2 ;;
     --local-ssh-opts)  LOCAL_SSH_OPTS="$2"; shift 2 ;;
     --ssh-ready-timeout) SSH_READY_TIMEOUT="$2"; shift 2 ;;
+    --chaos-scenario)  CHAOS_SCENARIO="$2"; shift 2 ;;
     *) echo "Unknown option: $1"; usage ;;
   esac
 done
@@ -179,6 +181,7 @@ cat > "$OUTPUT_FILE" << JSONEOF
   "type": "pre-migration",
   "vm_name": "${VM_NAME}",
   "namespace": "${NAMESPACE}",
+  "chaos_scenario": "${CHAOS_SCENARIO}",
   "timestamp_utc": "$(get_val CAPTURE_TIME_UTC)",
   "timestamp_local": "$(get_val CAPTURE_TIME_LOCAL)",
   "cluster": {

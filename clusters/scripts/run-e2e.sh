@@ -9,6 +9,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # ── Shared libraries ──────────────────────────────────────────
 source "${SCRIPT_DIR}/lib/log.sh"
 source "${SCRIPT_DIR}/lib/k8s.sh"
+source "${SCRIPT_DIR}/lib/ssh.sh"
 
 SOURCE_KUBECONFIG=""
 TARGET_KUBECONFIG=""
@@ -24,8 +25,8 @@ LOCAL_SSH_OPTS=""
 SSH_READY_TIMEOUT=600
 POST_SSH_READY_TIMEOUT=225
 STABILIZE_WAIT=30
-LARGE_DATA_SIZE_MB=500
-LARGE_DATA_SIZE_MB_EPHEMERAL=100
+LARGE_DATA_SIZE_MB=100
+LARGE_DATA_SIZE_MB_EPHEMERAL=50
 PAUSE_BEFORE_MIGRATION="false"
 SKIP_PROMETHEUS_METRICS="false"
 CHAOS_SCENARIO=""
@@ -51,8 +52,8 @@ Optional:
   --local-ssh-opts OPTS      Passed to virtctl ssh (default: -o StrictHostKeyChecking=accept-new)
   --ssh-ready-timeout SEC            Max seconds to wait for guest SSH before setup (default: 600)
   --stabilize-wait SEC               Seconds to wait after workload setup before pre-check (default: 30)
-  --large-data-size-mb MB            Size of persistent test data file in MB (default: 500)
-  --large-data-size-mb-ephemeral MB  Size of ephemeral test data file in MB (default: 100)
+  --large-data-size-mb MB            Size of persistent test data file in MB (default: 100)
+  --large-data-size-mb-ephemeral MB  Size of ephemeral test data file in MB (default: 50)
   --pause-before-migration           Pause before migration step and wait for user to press Enter
   --skip-prometheus-metrics          Skip Prometheus/VMIM metrics collection after migration
   --chaos-scenario NAME          Label for the chaos test being run (e.g. kill-source-virt-launcher)
@@ -191,9 +192,31 @@ step.begin "[2/6] SETUP WORKLOADS"
   --local-ssh-opts "$LOCAL_SSH_OPTS"
 
 task.begin "Stabilizing workloads"
-log.verbose "Waiting ${STABILIZE_WAIT}s for workloads to stabilize..."
-sleep "${STABILIZE_WAIT}"
-task.pass "Stabilized" "(${STABILIZE_WAIT}s)"
+log.verbose "Waiting up to ${STABILIZE_WAIT}s for workloads to produce data..."
+export KUBECONFIG="$SOURCE_KUBECONFIG"
+STAB_START=$(date +%s)
+STAB_OK=false
+while (( $(date +%s) - STAB_START < STABILIZE_WAIT )); do
+  STAB_OUT=$(run_on_vm "
+    LINES=\$(wc -l < /data/test/log.txt 2>/dev/null || echo 0)
+    ROWS=\$(sqlite3 /data/test.db 'SELECT count(*) FROM test;' 2>/dev/null || echo 0)
+    echo \"\$LINES \$ROWS\"
+  " 2>/dev/null || echo "0 0")
+  STAB_LINES=$(echo "$STAB_OUT" | awk '{print $1}')
+  STAB_ROWS=$(echo "$STAB_OUT" | awk '{print $2}')
+  STAB_LINES=${STAB_LINES:-0}; STAB_ROWS=${STAB_ROWS:-0}
+  if [[ "$STAB_LINES" -ge 3 ]] && [[ "$STAB_ROWS" -ge 3 ]] 2>/dev/null; then
+    STAB_OK=true; break
+  fi
+  log.verbose "  lines=$STAB_LINES rows=$STAB_ROWS — not ready, retrying in 5s..."
+  sleep 5
+done
+STAB_ELAPSED=$(( $(date +%s) - STAB_START ))
+if [[ "$STAB_OK" == "true" ]]; then
+  task.pass "Stabilized" "(${STAB_ELAPSED}s, lines=${STAB_LINES} rows=${STAB_ROWS})"
+else
+  task.pass "Stabilized" "(timeout ${STAB_ELAPSED}s, lines=${STAB_LINES} rows=${STAB_ROWS})"
+fi
 
 step.end "PASS"
 

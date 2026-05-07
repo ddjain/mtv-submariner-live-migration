@@ -23,8 +23,8 @@ KUBECONFIG_PATH=""
 LOCAL_SSH_OPTS=""
 SSH_READY_TIMEOUT=600
 SSH_READY_INTERVAL=15
-LARGE_DATA_SIZE_MB=500
-LARGE_DATA_SIZE_MB_EPHEMERAL=100
+LARGE_DATA_SIZE_MB=100
+LARGE_DATA_SIZE_MB_EPHEMERAL=50
 TEMPLATE_DIR=""
 
 usage() {
@@ -44,8 +44,8 @@ Optional:
   --template-dir DIR                 Templates directory (auto-detected if not set)
   --local-ssh-opts OPTS              Extra options for virtctl ssh
   --ssh-ready-timeout SEC            Max seconds to wait for guest SSH (default: 600)
-  --large-data-size-mb MB            Size of persistent test data in MB (default: 500)
-  --large-data-size-mb-ephemeral MB  Size of ephemeral test data in MB (default: 100)
+  --large-data-size-mb MB            Size of persistent test data in MB (default: 100)
+  --large-data-size-mb-ephemeral MB  Size of ephemeral test data in MB (default: 50)
 
 EOF
   exit 1

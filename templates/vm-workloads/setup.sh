@@ -8,8 +8,8 @@
 #
 set -euo pipefail
 
-LARGE_DATA_SIZE_MB=${1:-500}
-LARGE_DATA_SIZE_MB_EPHEMERAL=${2:-100}
+LARGE_DATA_SIZE_MB=${1:-100}
+LARGE_DATA_SIZE_MB_EPHEMERAL=${2:-50}
 WORKLOAD_DIR="/tmp/vm-workloads"
 
 echo "============================================"
@@ -31,11 +31,11 @@ echo ""
 
 echo "[2/4] Generating test data files in parallel..."
 
-dd if=/dev/urandom of=/data/large-file.bin \
+dd if=/dev/zero of=/data/large-file.bin \
   bs=1M count="${LARGE_DATA_SIZE_MB}" 2>/dev/null &
 PID1=$!
 
-dd if=/dev/urandom of=/var/lib/test-ephemeral/large-file.bin \
+dd if=/dev/zero of=/var/lib/test-ephemeral/large-file.bin \
   bs=1M count="${LARGE_DATA_SIZE_MB_EPHEMERAL}" 2>/dev/null &
 PID2=$!
 

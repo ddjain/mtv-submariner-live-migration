@@ -18,14 +18,14 @@
 _SSH_SH_LOADED=1
 
 SSH_READY_TIMEOUT="${SSH_READY_TIMEOUT:-600}"
-SSH_READY_INTERVAL="${SSH_READY_INTERVAL:-15}"
+SSH_READY_INTERVAL="${SSH_READY_INTERVAL:-5}"
 
 # Validate timeout parameters
 if ! [[ "${SSH_READY_TIMEOUT}" =~ ^[0-9]+$ ]]; then
   SSH_READY_TIMEOUT=600
 fi
 if ! [[ "${SSH_READY_INTERVAL}" =~ ^[0-9]+$ ]] || [[ "${SSH_READY_INTERVAL}" -eq 0 ]]; then
-  SSH_READY_INTERVAL=15
+  SSH_READY_INTERVAL=5
 fi
 
 # ── run_on_vm ─────────────────────────────────────────────────

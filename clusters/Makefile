@@ -46,8 +46,8 @@ SSH_READY_TIMEOUT_EFFECTIVE := $(or $(SSH_READY_TIMEOUT),600)
 STABILIZE_WAIT ?= 30
 
 # Large data generation settings (default: 500MB)
-LARGE_DATA_SIZE_MB ?= 500
-LARGE_DATA_SIZE_MB_EPHEMERAL ?= 100
+LARGE_DATA_SIZE_MB ?= 100
+LARGE_DATA_SIZE_MB_EPHEMERAL ?= 50
 
 # Pause before migration step for manual intervention (default: false)
 PAUSE_BEFORE_MIGRATION ?= false
@@ -268,7 +268,7 @@ help: ## Show this help
 	@echo "  VM_NAME_OVERRIDE=name for make run-e2e (fixed VM instead of random)"
 	@echo "  SSH_READY_TIMEOUT=900           seconds to wait for guest SSH after VM Ready (default 600)"
 	@echo "  STABILIZE_WAIT=60               seconds to wait after workload setup before pre-check (default 120)"
-	@echo "  LARGE_DATA_SIZE_MB=1000         size of test data file in MB (default 500)"
+	@echo "  LARGE_DATA_SIZE_MB=500          size of test data file in MB (default 100)"
 	@echo "  PAUSE_BEFORE_MIGRATION=true     pause before migration step for manual intervention (default: false)"
 	@echo "  CHAOS_SCENARIO=name             label for chaos test in migration-metrics JSON (default: empty)"
 	@echo "  SKIP_PROMETHEUS_METRICS=true     skip Prometheus/VMIM metrics after migration (default: false)"

@@ -49,6 +49,7 @@ done
 [[ -z "$SSH_KEY" ]]    && { echo "ERROR: --ssh-key is required"; usage; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/log.sh"
 
 if [[ -z "$TEMPLATE" ]]; then
   TEMPLATE="${SCRIPT_DIR}/../../templates/vm.yaml.template"
@@ -72,21 +73,22 @@ RENDERED=$(sed \
 mkdir -p "$OUTPUT_DIR"
 OUTFILE="${OUTPUT_DIR}/${VM_NAME}-vm.yaml"
 echo "$RENDERED" > "$OUTFILE"
-echo "Rendered manifest saved to ${OUTFILE}"
+task.pass "Rendered manifest"
+log.verbose "Saved to ${OUTFILE}"
 
 if [[ "$DRY_RUN" == true ]]; then
   echo "$RENDERED"
   exit 0
 fi
 
-echo "Creating VM '${VM_NAME}' in namespace '${NAMESPACE}'..."
+task.begin "Applying manifest"
 KUBECONFIG="$KUBECONFIG" kubectl apply -f "$OUTFILE"
+task.pass "Manifest applied"
 
-echo ""
-echo "Waiting for VM to be ready..."
+task.begin "Waiting for VM Ready"
 KUBECONFIG="$KUBECONFIG" kubectl wait vm/"$VM_NAME" \
   -n "$NAMESPACE" --for=condition=Ready --timeout=300s
+task.pass "VM Ready"
 
-echo ""
-echo "VM '${VM_NAME}' created successfully."
-KUBECONFIG="$KUBECONFIG" kubectl get vm,vmi "$VM_NAME" -n "$NAMESPACE"
+log.verbose "VM '${VM_NAME}' created successfully."
+log.debug "$(KUBECONFIG="$KUBECONFIG" kubectl get vm,vmi "$VM_NAME" -n "$NAMESPACE" 2>/dev/null || true)"

@@ -47,6 +47,7 @@ done
 [[ -z "$KUBECONFIG" ]] && { echo "ERROR: --kubeconfig is required"; usage; }
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/log.sh"
 
 if [[ -z "$TEMPLATE_DIR" ]]; then
   TEMPLATE_DIR="${SCRIPT_DIR}/../../templates"
@@ -77,7 +78,8 @@ PLAN_FILE="${OUTPUT_DIR}/${VM_NAME}-migration-plan.yaml"
 MIGRATION_FILE="${OUTPUT_DIR}/${VM_NAME}-migration.yaml"
 echo "$RENDERED_PLAN" > "$PLAN_FILE"
 echo "$RENDERED_MIGRATION" > "$MIGRATION_FILE"
-echo "Rendered manifests saved to ${OUTPUT_DIR}/"
+task.pass "Rendered manifests"
+log.verbose "Saved to ${OUTPUT_DIR}/"
 
 if [[ "$DRY_RUN" == true ]]; then
   echo "--- # Plan"
@@ -88,25 +90,21 @@ if [[ "$DRY_RUN" == true ]]; then
   exit 0
 fi
 
-# -- Apply Plan --
-echo "Applying migration plan for VM '${VM_NAME}'..."
+task.begin "Applying migration plan"
 KUBECONFIG="$KUBECONFIG" kubectl apply -f "$PLAN_FILE"
 
-echo "Waiting for Plan to become Ready..."
+log.verbose "Waiting for Plan to become Ready..."
 KUBECONFIG="$KUBECONFIG" kubectl wait plan/"${VM_NAME}-migration-plan" \
   -n openshift-mtv --for=condition=Ready --timeout=120s
-echo "Plan is Ready."
+task.pass "Plan is Ready"
 
 if [[ "$PLAN_ONLY" == true ]]; then
   echo "Plan-only mode. Skipping migration trigger."
   exit 0
 fi
 
-# -- Trigger Migration --
-echo ""
-echo "Triggering migration..."
+task.begin "Triggering migration"
 KUBECONFIG="$KUBECONFIG" kubectl apply -f "$MIGRATION_FILE"
+task.pass "Migration created"
 
-echo ""
-echo "Migration '${VM_NAME}-migration' created. Monitor with:"
-echo "  KUBECONFIG=${KUBECONFIG} kubectl get migration ${VM_NAME}-migration -n openshift-mtv -w"
+log.verbose "Monitor: KUBECONFIG=${KUBECONFIG} kubectl get migration ${VM_NAME}-migration -n openshift-mtv -w"

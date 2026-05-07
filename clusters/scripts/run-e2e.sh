@@ -6,6 +6,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# ── Shared libraries ──────────────────────────────────────────
+source "${SCRIPT_DIR}/lib/log.sh"
+source "${SCRIPT_DIR}/lib/k8s.sh"
+
 SOURCE_KUBECONFIG=""
 TARGET_KUBECONFIG=""
 SSH_KEY="${HOME}/.ssh/id_rsa"
@@ -18,6 +22,7 @@ VM_NAME=""
 LOCAL_SSH_OPTS_DEFAULT="-o StrictHostKeyChecking=accept-new"
 LOCAL_SSH_OPTS=""
 SSH_READY_TIMEOUT=600
+POST_SSH_READY_TIMEOUT=225
 STABILIZE_WAIT=30
 LARGE_DATA_SIZE_MB=500
 LARGE_DATA_SIZE_MB_EPHEMERAL=100
@@ -51,6 +56,8 @@ Optional:
   --pause-before-migration           Pause before migration step and wait for user to press Enter
   --skip-prometheus-metrics          Skip Prometheus/VMIM metrics collection after migration
   --chaos-scenario NAME          Label for the chaos test being run (e.g. kill-source-virt-launcher)
+  --verbose                      Set LOG_LEVEL=2 (operational detail)
+  --debug                        Set LOG_LEVEL=3 (raw trace)
 
 EOF
   exit 1
@@ -75,6 +82,8 @@ while [[ $# -gt 0 ]]; do
     --pause-before-migration)         PAUSE_BEFORE_MIGRATION="true"; shift ;;
     --skip-prometheus-metrics)       SKIP_PROMETHEUS_METRICS="true"; shift ;;
     --chaos-scenario)               CHAOS_SCENARIO="$2"; shift 2 ;;
+    --verbose)                       export LOG_LEVEL=2; shift ;;
+    --debug)                         export LOG_LEVEL=3; shift ;;
     -h|--help)                        usage ;;
     *)                                echo "Unknown option: $1"; usage ;;
   esac
@@ -82,6 +91,8 @@ done
 
 [[ -z "$SOURCE_KUBECONFIG" ]] && { echo "ERROR: --source-kubeconfig is required"; usage; }
 [[ -z "$TARGET_KUBECONFIG" ]] && { echo "ERROR: --target-kubeconfig is required"; usage; }
+
+export LOG_LEVEL
 
 TEMPLATE_DIR="${TEMPLATE_DIR:-${SCRIPT_DIR}/../../templates}"
 GENERATED_DIR="${GENERATED_DIR:-${SCRIPT_DIR}/generated}"
@@ -93,30 +104,11 @@ fi
 
 mkdir -p "$GENERATED_DIR" "$REPORT_DIR"
 
-# Per-job report folder: reports/<scenario>-<vm>-<timestamp>/ or reports/<vm>-<timestamp>/
 RUN_TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
+PIPELINE_START_TIME=$(date +%s)
 
-step_banner() {
-  echo ""
-  echo "================================================================"
-  echo "  $1"
-  echo "================================================================"
-}
-
-capture_pod_restarts() {
-  local kc="$1"; shift
-  local result="[]"
-  for ns in "$@"; do
-    local pods_json
-    pods_json="$(KUBECONFIG="$kc" kubectl get pods -n "$ns" -o json 2>/dev/null \
-      || echo '{"items":[]}')"
-    local ns_restarts
-    ns_restarts="$(echo "$pods_json" | jq --arg ns "$ns" \
-      '[.items[] | {namespace: $ns, pod: .metadata.name, restarts: ([.status.containerStatuses[]?.restartCount] | add // 0)}]')"
-    result="$(echo "$result" "$ns_restarts" | jq -s 'add')"
-  done
-  echo "$result"
-}
+# ── Enable failure auto-expansion ─────────────────────────────
+log.enable_failure_context
 
 if [[ -z "$VM_NAME" ]]; then
   prefixes=(
@@ -140,16 +132,19 @@ else
 fi
 mkdir -p "$RUN_REPORT_DIR"
 
-echo ""
-echo "================================================================"
-echo "  E2E Migration Pipeline"
-echo "  VM_NAME:    ${VM_NAME}"
-echo "  Namespace:  ${NAMESPACE}"
-echo "  Report Dir: ${RUN_REPORT_DIR}"
-echo "================================================================"
-echo ""
+# ── Pipeline header ───────────────────────────────────────────
+log.banner "E2E Migration Pipeline"
+log.info "  VM_NAME:    ${VM_NAME}"
+log.info "  Namespace:  ${NAMESPACE}"
+log.info "  Report Dir: ${RUN_REPORT_DIR}"
+[[ -n "$CHAOS_SCENARIO" ]] && log.info "  Chaos:      ${CHAOS_SCENARIO}"
+log.info ""
 
-step_banner "[1/6] CREATE VM"
+# ══════════════════════════════════════════════════════════════
+# [1/6] CREATE VM
+# ══════════════════════════════════════════════════════════════
+
+step.begin "[1/6] CREATE VM"
 "${SCRIPT_DIR}/create-vm.sh" \
   --kubeconfig "$SOURCE_KUBECONFIG" \
   --vm "$VM_NAME" \
@@ -158,31 +153,31 @@ step_banner "[1/6] CREATE VM"
   --template "${TEMPLATE_DIR}/vm.yaml.template" \
   --output-dir "$GENERATED_DIR"
 
-echo ""
-echo "  ---- VM Details (source cluster) ----"
-echo "  Name:       ${VM_NAME}"
-echo "  Namespace:  ${NAMESPACE}"
 VM_NODE="$(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "n/a")"
 VM_IP="$(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "n/a")"
 VM_PHASE="$(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.phase}' 2>/dev/null || echo "n/a")"
 VM_READY="$(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.ready}' 2>/dev/null || echo "n/a")"
-echo "  Node:       ${VM_NODE}"
-echo "  Pod IP:     ${VM_IP}"
-echo "  VMI Phase:  ${VM_PHASE}"
-echo "  VM Ready:   ${VM_READY}"
-echo ""
-echo "  # Copy-paste for krknctl / chaos (same variable names as your shell):"
-echo "  export VM_NAME=\"${VM_NAME}\""
-echo "  export KUBECONFIG_PATH=\"${SOURCE_KUBECONFIG}\""
-echo "  export NAMESPACE=\"${NAMESPACE}\""
-if [[ -n "${VM_NODE}" ]] && [[ "${VM_NODE}" != "n/a" ]]; then
-  echo "  export NODE_LABEL_SELECTOR=\"kubernetes.io/hostname=${VM_NODE}\""
-else
-  echo "  export NODE_LABEL_SELECTOR=\"\"  # set node: kubectl get vmi ${VM_NAME} -n ${NAMESPACE} -o jsonpath='{.status.nodeName}'"
-fi
-echo "  --------------------------------------"
 
-step_banner "[2/6] SETUP WORKLOADS"
+step.end "PASS"
+
+log.verbose "VM Details:"
+log.verbose "  Name: ${VM_NAME}  Node: ${VM_NODE}  IP: ${VM_IP}  Phase: ${VM_PHASE}  Ready: ${VM_READY}"
+log.verbose ""
+log.verbose "Copy-paste for krknctl / chaos:"
+log.verbose "  export VM_NAME=\"${VM_NAME}\""
+log.verbose "  export KUBECONFIG_PATH=\"${SOURCE_KUBECONFIG}\""
+log.verbose "  export NAMESPACE=\"${NAMESPACE}\""
+if [[ -n "${VM_NODE}" ]] && [[ "${VM_NODE}" != "n/a" ]]; then
+  log.verbose "  export NODE_LABEL_SELECTOR=\"kubernetes.io/hostname=${VM_NODE}\""
+else
+  log.verbose "  export NODE_LABEL_SELECTOR=\"\"  # set node manually"
+fi
+
+# ══════════════════════════════════════════════════════════════
+# [2/6] SETUP WORKLOADS
+# ══════════════════════════════════════════════════════════════
+
+step.begin "[2/6] SETUP WORKLOADS"
 "${SCRIPT_DIR}/setup-vm-workloads.sh" \
   --kubeconfig "$SOURCE_KUBECONFIG" \
   --vm "$VM_NAME" \
@@ -195,11 +190,18 @@ step_banner "[2/6] SETUP WORKLOADS"
   --large-data-size-mb-ephemeral "$LARGE_DATA_SIZE_MB_EPHEMERAL" \
   --local-ssh-opts "$LOCAL_SSH_OPTS"
 
-echo ""
-echo "  Waiting ${STABILIZE_WAIT}s for workloads to stabilize..."
+task.begin "Stabilizing workloads"
+log.verbose "Waiting ${STABILIZE_WAIT}s for workloads to stabilize..."
 sleep "${STABILIZE_WAIT}"
+task.pass "Stabilized" "(${STABILIZE_WAIT}s)"
 
-step_banner "[3/6] PRE-MIGRATION CHECK"
+step.end "PASS"
+
+# ══════════════════════════════════════════════════════════════
+# [3/6] PRE-MIGRATION CHECK
+# ══════════════════════════════════════════════════════════════
+
+step.begin "[3/6] PRE-MIGRATION CHECK"
 "${SCRIPT_DIR}/pre-migration-check.sh" \
   --kubeconfig "$SOURCE_KUBECONFIG" \
   --vm "$VM_NAME" \
@@ -212,41 +214,53 @@ step_banner "[3/6] PRE-MIGRATION CHECK"
   --chaos-scenario "$CHAOS_SCENARIO"
 
 PRE_FILE="$(ls -t "${RUN_REPORT_DIR}/pre-migration-${VM_NAME}-"*.json 2>/dev/null | head -1 || true)"
-[[ -n "$PRE_FILE" ]] || { echo "ERROR: Could not find pre-migration JSON for ${VM_NAME}"; exit 1; }
-echo "Using pre-migration baseline: ${PRE_FILE}"
+[[ -n "$PRE_FILE" ]] || { log.error "Could not find pre-migration JSON for ${VM_NAME}"; exit 1; }
+log.verbose "Using pre-migration baseline: ${PRE_FILE}"
 
-# Pause before migration if requested
+step.end "PASS"
+
+# ── Pause before migration ────────────────────────────────────
 if [[ "$PAUSE_BEFORE_MIGRATION" == "true" ]]; then
+  log.box \
+    "PAUSED BEFORE MIGRATION" \
+    "" \
+    "VM:         ${VM_NAME}" \
+    "Namespace:  ${NAMESPACE}" \
+    "Node:       $(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo 'n/a')" \
+    "Pod IP:     $(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo 'n/a')" \
+    "" \
+    "Baseline: ${PRE_FILE}" \
+    "" \
+    "Steps completed:" \
+    "  ✓ [1/6] CREATE VM" \
+    "  ✓ [2/6] SETUP WORKLOADS" \
+    "  ✓ [3/6] PRE-MIGRATION CHECK" \
+    "" \
+    "Steps remaining:" \
+    "  ○ [4/6] MIGRATE VM" \
+    "  ○ [5/6] WAIT FOR MIGRATION" \
+    "  ○ [6/6] POST-MIGRATION CHECK" \
+    "" \
+    "Quick actions:" \
+    "  • SSH:   make ssh-source VM_NAME=${VM_NAME}" \
+    "  • Chaos: bash clusters/scripts/chaos-trigger.sh"
   echo ""
-  echo "╔════════════════════════════════════════════════════════════════════════════╗"
-  echo "║                         PAUSED BEFORE MIGRATION                            ║"
-  echo "╚════════════════════════════════════════════════════════════════════════════╝"
-  echo ""
-  echo "  VM Details:"
-  echo "    Name:       ${VM_NAME}"
-  echo "    Namespace:  ${NAMESPACE}"
-  echo "    Node:       $(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo 'n/a')"
-  echo "    Pod IP:     $(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo 'n/a')"
-  echo ""
-  echo "  Pre-migration baseline: ${PRE_FILE}"
-  echo ""
-  echo "  You can now:"
-  echo "    • Inspect VM state:           make ssh-source VM_NAME=${VM_NAME}"
-  echo "    • Run additional pre-checks:  make pre-check VM_NAME=${VM_NAME}"
-  echo "    • Simulate pod restart:       kubectl delete pod -n ${NAMESPACE} -l kubevirt.io/vm=${VM_NAME}"
-  echo "    • Run chaos experiments"
-  echo ""
-  read -p "  Press Enter to continue with migration, or Ctrl+C to abort... " _
+  read -p "  → Press Enter to continue with migration, or Ctrl+C to abort... " _
   echo ""
 fi
 
-echo "  Capturing pod restart counts (pre-migration)..."
+task.begin "Capturing pod restarts (pre-migration)"
 PRE_RESTARTS_SOURCE=$(capture_pod_restarts "$SOURCE_KUBECONFIG" \
   openshift-cnv openshift-mtv submariner-operator "$NAMESPACE")
 PRE_RESTARTS_TARGET=$(capture_pod_restarts "$TARGET_KUBECONFIG" \
   openshift-cnv openshift-mtv submariner-operator "$NAMESPACE")
+task.pass "Pod restarts captured"
 
-step_banner "[4/6] MIGRATE VM"
+# ══════════════════════════════════════════════════════════════
+# [4/6] MIGRATE VM
+# ══════════════════════════════════════════════════════════════
+
+step.begin "[4/6] MIGRATE VM"
 "${SCRIPT_DIR}/migrate-vm.sh" \
   --kubeconfig "$SOURCE_KUBECONFIG" \
   --vm "$VM_NAME" \
@@ -254,110 +268,93 @@ step_banner "[4/6] MIGRATE VM"
   --template-dir "$TEMPLATE_DIR" \
   --output-dir "$GENERATED_DIR"
 
-echo "  Copying generated manifests to report folder..."
+task.begin "Copying manifests to report folder"
 for f in "${GENERATED_DIR}/${VM_NAME}-vm.yaml" \
          "${GENERATED_DIR}/${VM_NAME}-migration-plan.yaml" \
          "${GENERATED_DIR}/${VM_NAME}-migration.yaml"; do
   [[ -f "$f" ]] && cp "$f" "$RUN_REPORT_DIR/"
 done
+task.pass "Manifests copied"
 
-step_banner "[5/6] WAIT FOR MIGRATION (up to 60 checks, 10s apart)"
+step.end "PASS"
+
+# ══════════════════════════════════════════════════════════════
+# [5/6] WAIT FOR MIGRATION
+# ══════════════════════════════════════════════════════════════
+
+step.begin "[5/6] WAIT FOR MIGRATION"
 MAX_ATTEMPTS=60
 MIGRATION_START_TIME=$(date +%s)
 LAST_STEP=""
 
-echo "Monitoring migration progress..."
-echo ""
+log.verbose "Monitoring migration progress (up to ${MAX_ATTEMPTS} checks, 10s apart)..."
 
 MIGRATION_FAILED=false
 
 for i in $(seq 1 "$MAX_ATTEMPTS"); do
-  # Get comprehensive migration status
   MIG_STATUS="$(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get migration "${VM_NAME}-migration" \
     -n openshift-mtv -o json 2>/dev/null || echo '{}')"
 
-  # Extract key status fields
   succ="$(echo "$MIG_STATUS" | jq -r '.status.conditions[]? | select(.type=="Succeeded") | .status' 2>/dev/null || echo "")"
   vm_phase="$(echo "$MIG_STATUS" | jq -r '.status.vms[0].phase // "Pending"' 2>/dev/null || echo "Pending")"
 
-  # Get pipeline steps
-  pipeline_json="$(echo "$MIG_STATUS" | jq -r '.status.vms[0].pipeline[]? // empty' 2>/dev/null || echo "")"
-
-  # Find current step (first non-Completed step)
   current_step="$(echo "$MIG_STATUS" | jq -r '.status.vms[0].pipeline[]? | select(.phase != "Completed") | .name' 2>/dev/null | head -1 || echo "")"
   current_step_desc="$(echo "$MIG_STATUS" | jq -r '.status.vms[0].pipeline[]? | select(.phase != "Completed") | .description' 2>/dev/null | head -1 || echo "")"
-  current_step_phase="$(echo "$MIG_STATUS" | jq -r '.status.vms[0].pipeline[]? | select(.phase != "Completed") | .phase' 2>/dev/null | head -1 || echo "")"
 
-  # Count completed vs total steps
   total_steps="$(echo "$MIG_STATUS" | jq -r '[.status.vms[0].pipeline[]?] | length' 2>/dev/null || echo "0")"
   completed_steps="$(echo "$MIG_STATUS" | jq -r '[.status.vms[0].pipeline[]? | select(.phase == "Completed")] | length' 2>/dev/null || echo "0")"
 
-  # Calculate elapsed time
   ELAPSED=$(($(date +%s) - MIGRATION_START_TIME))
   ELAPSED_MIN=$((ELAPSED / 60))
   ELAPSED_SEC=$((ELAPSED % 60))
 
-  # Check for completion
+  # ── Completed successfully ──
   if [[ "$vm_phase" == "Completed" ]] || [[ "$succ" == "True" ]]; then
-    echo ""
-    echo "╔════════════════════════════════════════════════════════════════════════════╗"
-    echo "║                      MIGRATION COMPLETED SUCCESSFULLY                      ║"
-    echo "╚════════════════════════════════════════════════════════════════════════════╝"
-    echo ""
-    echo "  Total time: ${ELAPSED_MIN}m ${ELAPSED_SEC}s"
-    echo "  Final phase: ${vm_phase}"
-    echo ""
+    [[ -n "$LAST_STEP" ]] && task.pass "$LAST_STEP"
+    task.pass "Migration completed" "(${ELAPSED_MIN}m${ELAPSED_SEC}s)"
+    step.end "PASS"
     break
   fi
 
-  # Check for failure
+  # ── Failed ──
   if [[ "$vm_phase" == "Failed" ]]; then
-    echo ""
-    echo "ERROR: Migration failed!"
-    echo ""
-    echo "Pipeline status:"
-    echo "$MIG_STATUS" | jq -r '.status.vms[0].pipeline[]? | "  [\(.phase)] \(.name): \(.description)"' 2>/dev/null || echo "  Unable to retrieve pipeline status"
-    echo ""
-    KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get migration "${VM_NAME}-migration" -n openshift-mtv -o yaml || true
+    [[ -n "$LAST_STEP" ]] && task.fail "$LAST_STEP" "phase=$vm_phase"
+    log.error "Migration failed!"
+    log.info ""
+    log.info "   Pipeline status:"
+    echo "$MIG_STATUS" | jq -r '.status.vms[0].pipeline[]? | "     [\(.phase)] \(.name): \(.description)"' 2>/dev/null || log.info "     Unable to retrieve pipeline status"
+    log.info ""
+    log.debug "$(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get migration "${VM_NAME}-migration" -n openshift-mtv -o yaml 2>/dev/null || true)"
+    step.end "FAIL"
     MIGRATION_FAILED=true
     break
   fi
 
-  # Timeout check
+  # ── Timeout ──
   if [[ "$i" -eq "$MAX_ATTEMPTS" ]]; then
-    echo ""
-    echo "ERROR: Migration did not complete after ${MAX_ATTEMPTS} checks (~$((MAX_ATTEMPTS * 10))s)."
-    echo ""
-    echo "Last known status:"
-    echo "  VM Phase: ${vm_phase}"
-    echo "  Current step: ${current_step:-unknown}"
-    echo "  Progress: ${completed_steps}/${total_steps} steps"
-    echo ""
-    KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get migration "${VM_NAME}-migration" -n openshift-mtv -o yaml || true
+    log.error "Migration did not complete after ${MAX_ATTEMPTS} checks (~$((MAX_ATTEMPTS * 10))s)."
+    log.info "   Last status: Phase=${vm_phase} Step=${current_step:-unknown} Progress=${completed_steps}/${total_steps}"
+    log.debug "$(KUBECONFIG="$SOURCE_KUBECONFIG" kubectl get migration "${VM_NAME}-migration" -n openshift-mtv -o yaml 2>/dev/null || true)"
+    step.end "FAIL"
     MIGRATION_FAILED=true
     break
   fi
 
-  # Display progress update (show new step or every 5th check)
-  if [[ "$current_step" != "$LAST_STEP" ]] || [[ $((i % 5)) -eq 0 ]]; then
-    printf "  [%2d/%2d] %dm%02ds | Phase: %-12s | Steps: %d/%d" \
-      "$i" "$MAX_ATTEMPTS" "$ELAPSED_MIN" "$ELAPSED_SEC" "$vm_phase" "$completed_steps" "$total_steps"
-
-    if [[ -n "$current_step" ]]; then
-      printf " | %-18s: %s\n" "$current_step" "$current_step_desc"
-    else
-      printf " | Initializing...\n"
-    fi
-
+  # ── Progress ──
+  if [[ "$current_step" != "$LAST_STEP" ]]; then
+    [[ -n "$LAST_STEP" ]] && task.pass "$LAST_STEP"
+    task.begin "${current_step:-Initializing}"
+    log.verbose "${current_step_desc:-Waiting for pipeline to start}"
     LAST_STEP="$current_step"
   fi
+
+  progress.update "${current_step:-Initializing}" "${completed_steps}/${total_steps} steps (${ELAPSED_MIN}m${ELAPSED_SEC}s)"
 
   sleep 10
 done
 
-# --- Migration Metrics Collection ---
+# ── Migration metrics collection ──────────────────────────────
 
-# Determine migration outcome from final loop state
 MIGRATION_DURATION_SEC="${ELAPSED:-0}"
 if [[ "$vm_phase" == "Completed" ]] || [[ "$succ" == "True" ]]; then
   MIGRATION_OUTCOME="succeeded"
@@ -367,16 +364,16 @@ else
   MIGRATION_OUTCOME="timeout"
 fi
 
-# Extract pipeline step timings from the last Migration CR snapshot
 PIPELINE_TIMINGS="$(echo "$MIG_STATUS" | jq \
   '[.status.vms[0].pipeline[]? | {name, description, phase, started, completed}]' \
   2>/dev/null || echo '[]')"
 
-echo "  Capturing pod restart counts (post-migration)..."
+task.begin "Capturing pod restarts (post-migration)"
 POST_RESTARTS_SOURCE=$(capture_pod_restarts "$SOURCE_KUBECONFIG" \
   openshift-cnv openshift-mtv submariner-operator "$NAMESPACE")
 POST_RESTARTS_TARGET=$(capture_pod_restarts "$TARGET_KUBECONFIG" \
   openshift-cnv openshift-mtv submariner-operator "$NAMESPACE")
+task.pass "Pod restarts captured"
 
 POD_RESTART_DIFF="$(jq -n \
   --argjson pre_s "$PRE_RESTARTS_SOURCE" \
@@ -396,6 +393,12 @@ POD_RESTART_DIFF="$(jq -n \
     | select(.diff > 0)
   )]
 ' 2>/dev/null || echo '[]')"
+
+RESTART_COUNT="$(echo "$POD_RESTART_DIFF" | jq 'length' 2>/dev/null || echo 0)"
+if [[ "$RESTART_COUNT" -gt 0 ]]; then
+  log.warn "Pod restarts detected during migration: ${RESTART_COUNT} pod(s)"
+  log.verbose "$(echo "$POD_RESTART_DIFF" | jq -r '.[] | "  \(.cluster)/\(.namespace)/\(.pod) +\(.diff)"' 2>/dev/null || true)"
+fi
 
 METRICS_TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
 MIGRATION_METRICS_FILE="${RUN_REPORT_DIR}/migration-metrics-${VM_NAME}-${METRICS_TIMESTAMP}.json"
@@ -424,13 +427,13 @@ jq -n \
     }
   }' > "$MIGRATION_METRICS_FILE"
 
-echo "  Migration metrics saved to: ${MIGRATION_METRICS_FILE}"
+log.verbose "Migration metrics saved to: ${MIGRATION_METRICS_FILE}"
 
-# --- Prometheus + VMIM Metrics (enabled by default) ---
+# ── Prometheus + VMIM Metrics ─────────────────────────────────
 if [[ "$SKIP_PROMETHEUS_METRICS" != "true" ]]; then
   MIGRATION_END_TIME=$(date +%s)
   PROM_METRICS_FILE="${RUN_REPORT_DIR}/prometheus-metrics-${VM_NAME}-${METRICS_TIMESTAMP}.json"
-  echo "  Capturing Prometheus metrics and VMIM data..."
+  task.begin "Capturing Prometheus metrics"
   if "${SCRIPT_DIR}/capture-prometheus-metrics.sh" \
       --source-kubeconfig "$SOURCE_KUBECONFIG" \
       --vm "$VM_NAME" \
@@ -442,22 +445,26 @@ if [[ "$SKIP_PROMETHEUS_METRICS" != "true" ]]; then
     jq -s '.[0] * {prometheus: .[1]}' \
       "$MIGRATION_METRICS_FILE" "$PROM_METRICS_FILE" > "${MIGRATION_METRICS_FILE}.tmp" \
       && mv "${MIGRATION_METRICS_FILE}.tmp" "$MIGRATION_METRICS_FILE"
-    echo "  Prometheus metrics merged into: ${MIGRATION_METRICS_FILE}"
+    task.pass "Prometheus metrics merged"
   else
-    echo "  WARNING: Prometheus metrics capture failed (non-fatal), continuing..."
+    task.fail "Prometheus metrics" "capture failed (non-fatal)"
+    log.warn "Prometheus metrics capture failed, continuing..."
   fi
 else
-  echo "  Prometheus metrics collection skipped (--skip-prometheus-metrics)."
+  log.verbose "Prometheus metrics collection skipped (--skip-prometheus-metrics)."
 fi
 
 if [[ "$MIGRATION_FAILED" == "true" ]]; then
-  echo ""
-  echo "  Migration failed but metrics were captured."
-  echo "  Exiting with error."
+  log.info ""
+  log.error "Migration failed but metrics were captured."
   exit 1
 fi
 
-step_banner "[6/6] POST-MIGRATION CHECK (target cluster)"
+# ══════════════════════════════════════════════════════════════
+# [6/6] POST-MIGRATION CHECK
+# ══════════════════════════════════════════════════════════════
+
+step.begin "[6/6] POST-MIGRATION CHECK"
 "${SCRIPT_DIR}/post-migration-check.sh" \
   --kubeconfig "$TARGET_KUBECONFIG" \
   --vm "$VM_NAME" \
@@ -467,12 +474,20 @@ step_banner "[6/6] POST-MIGRATION CHECK (target cluster)"
   --output-dir "$RUN_REPORT_DIR" \
   --pre-migration-file "$PRE_FILE" \
   --local-ssh-opts "$LOCAL_SSH_OPTS" \
-  --ssh-ready-timeout "$SSH_READY_TIMEOUT" \
+  --ssh-ready-timeout "$POST_SSH_READY_TIMEOUT" \
   --chaos-scenario "$CHAOS_SCENARIO"
+step.end "PASS"
 
-echo ""
-echo "================================================================"
-echo "  E2E completed for VM: ${VM_NAME}"
-echo "  Reports: ${RUN_REPORT_DIR}"
-echo "================================================================"
-echo ""
+# ── Pipeline footer ───────────────────────────────────────────
+PIPELINE_ELAPSED=$(( $(date +%s) - PIPELINE_START_TIME ))
+PIPELINE_MIN=$((PIPELINE_ELAPSED / 60))
+PIPELINE_SEC=$((PIPELINE_ELAPSED % 60))
+
+log.banner "E2E Completed"
+log.info "  VM:        ${VM_NAME}"
+[[ -n "$CHAOS_SCENARIO" ]] && log.info "  Chaos:     ${CHAOS_SCENARIO}"
+log.info "  Reports:   ${RUN_REPORT_DIR}"
+log.info "  Duration:  ${PIPELINE_MIN}m${PIPELINE_SEC}s"
+log.info ""
+
+log.cleanup_failure_context

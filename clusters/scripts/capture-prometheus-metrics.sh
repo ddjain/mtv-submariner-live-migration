@@ -57,6 +57,9 @@ done
 [[ -z "$START_EPOCH" ]]      && { echo "ERROR: --start-epoch is required"; usage; }
 [[ -z "$END_EPOCH" ]]        && { echo "ERROR: --end-epoch is required"; usage; }
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/log.sh"
+
 export KUBECONFIG="$SOURCE_KUBECONFIG"
 
 # Widen the query window by 60s on each side to catch metrics scraped
@@ -73,7 +76,7 @@ THANOS_HOST=$(kubectl get route thanos-querier -n openshift-monitoring \
   -o jsonpath='{.spec.host}' 2>/dev/null || true)
 
 if [[ -z "$THANOS_HOST" ]]; then
-  echo "ERROR: Could not discover Thanos route in openshift-monitoring" >&2
+  log.error "Could not discover Thanos route in openshift-monitoring"
   exit 1
 fi
 
@@ -83,7 +86,7 @@ TOKEN=$(kubectl create token prometheus-k8s -n openshift-monitoring \
   --duration=600s 2>/dev/null || true)
 
 if [[ -z "$TOKEN" ]]; then
-  echo "ERROR: Could not create SA token for prometheus-k8s" >&2
+  log.error "Could not create SA token for prometheus-k8s"
   exit 1
 fi
 
@@ -140,7 +143,7 @@ instant_value() {
   ' 2>/dev/null || echo 'null'
 }
 
-echo "  Querying Thanos at ${THANOS_HOST}..." >&2
+log.info_err "  Querying Thanos at ${THANOS_HOST}..."
 
 # ──────────────────────────────────────────────
 # 1. Migration transfer metrics (range)
@@ -214,7 +217,7 @@ MTV_STATUS=$(echo "$MTV_STATUS_RAW" | jq '
 # 5. VMIM CR extraction
 # ──────────────────────────────────────────────
 
-echo "  Extracting VMIM CR data..." >&2
+log.verbose_err "Extracting VMIM CR data..."
 
 VMIM_JSON=$(kubectl get vmim -A -o json --request-timeout=15s 2>/dev/null \
   | jq --arg vm "$VM_NAME" '
@@ -370,7 +373,7 @@ RESULT=$(jq -n \
 
 if [[ -n "$OUTPUT_FILE" ]]; then
   echo "$RESULT" > "$OUTPUT_FILE"
-  echo "  Prometheus metrics written to: ${OUTPUT_FILE}" >&2
+  log.verbose_err "Prometheus metrics written to: ${OUTPUT_FILE}"
 else
   echo "$RESULT"
 fi

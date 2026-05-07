@@ -53,16 +53,9 @@ done
 [[ -z "$KUBECONFIG_PATH" ]] && { echo "ERROR: --kubeconfig is required"; usage; }
 [[ -z "$VM_NAME" ]] && { echo "ERROR: --vm is required"; usage; }
 
-# Validate timeout parameters
-if [[ -z "${SSH_READY_TIMEOUT:-}" ]] || ! [[ "${SSH_READY_TIMEOUT}" =~ ^[0-9]+$ ]]; then
-  SSH_READY_TIMEOUT=600
-fi
-if [[ -z "${SSH_READY_INTERVAL:-}" ]] || ! [[ "${SSH_READY_INTERVAL}" =~ ^[0-9]+$ ]] || [[ "${SSH_READY_INTERVAL}" -eq 0 ]]; then
-  SSH_READY_INTERVAL=15
-fi
-
-# SSH options are now hardcoded in run_on_vm() function using two separate flags
-# This ensures it works with both new and changed SSH host keys
+# ── Shared libraries ──────────────────────────────────────────
+source "${SCRIPT_DIR}/lib/log.sh"
+source "${SCRIPT_DIR}/lib/ssh.sh"
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 mkdir -p "$OUTPUT_DIR"
@@ -70,54 +63,19 @@ mkdir -p "$OUTPUT_DIR"
 TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
 OUTPUT_FILE="${OUTPUT_DIR}/post-migration-${VM_NAME}-${TIMESTAMP}.json"
 
-run_on_vm() {
-  virtctl ssh "${SSH_USER}@vm/${VM_NAME}" \
-    --namespace "$NAMESPACE" \
-    --identity-file="$SSH_KEY" \
-    --local-ssh-opts="-o StrictHostKeyChecking=no" \
-    --local-ssh-opts="-o UserKnownHostsFile=/dev/null" \
-    --command "$1"
-}
-
-wait_for_guest_ssh() {
-  if [[ "${SSH_READY_TIMEOUT}" -eq 0 ]]; then
-    return 0
-  fi
-  local max_attempts=$(( SSH_READY_TIMEOUT / SSH_READY_INTERVAL ))
-  if [[ "${max_attempts}" -lt 1 ]]; then
-    max_attempts=1
-  fi
-  local attempt=1
-  echo "Waiting for guest SSH (virtctl) — up to ${SSH_READY_TIMEOUT}s, every ${SSH_READY_INTERVAL}s..."
-  while [[ "${attempt}" -le "${max_attempts}" ]]; do
-    if run_on_vm "true" >/dev/null 2>&1; then
-      echo "Guest SSH is reachable (attempt ${attempt}/${max_attempts})."
-      echo ""
-      return 0
-    fi
-    echo "  SSH not ready yet (attempt ${attempt}/${max_attempts}), retrying in ${SSH_READY_INTERVAL}s..."
-    sleep "${SSH_READY_INTERVAL}"
-    attempt=$(( attempt + 1 ))
-  done
-  echo "ERROR: Guest SSH did not become reachable within ${SSH_READY_TIMEOUT}s."
-  exit 1
-}
-
-echo "============================================"
-echo "  Post-Migration Check: ${VM_NAME}"
-echo "  Timestamp: ${TIMESTAMP}"
-echo "============================================"
-echo ""
+log.verbose "Post-Migration Check: ${VM_NAME} (${TIMESTAMP})"
 
 wait_for_guest_ssh
 
-echo "Collecting cluster info..."
+task.begin "Collecting cluster info"
 CLUSTER_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo "unknown")
 VM_STATUS=$(kubectl get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "unknown")
 VM_NODE=$(kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
 VM_IP=$(kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
 
-echo "Collecting VM workload data..."
+task.pass "Cluster info collected"
+
+task.begin "Collecting VM workload data"
 VM_DATA=$(run_on_vm "
 echo \"CAPTURE_TIME_UTC=\$(date -u '+%Y-%m-%dT%H:%M:%S UTC')\"
 echo \"CAPTURE_TIME_LOCAL=\$(date '+%Y-%m-%d %H:%M:%S %Z')\"
@@ -173,12 +131,14 @@ echo \"EPHEMERAL_LARGE_FILE_SIZE=\$(stat -c%s /var/lib/test-ephemeral/large-file
 echo \"EPHEMERAL_LARGE_FILE_SHA256=\$(sha256sum /var/lib/test-ephemeral/large-file.bin 2>/dev/null | awk '{print \$1}' || echo none)\"
 ")
 
+task.pass "VM workload data collected"
+
 get_val() {
   echo "$VM_DATA" | grep "^${1}=" | head -1 | cut -d'=' -f2-
 }
 
-# --- SQLite time-bucketed gap analysis (30s windows) ---
-echo "Analyzing SQLite insert gaps (30s time windows)..."
+task.begin "Analyzing data gaps"
+log.verbose "Analyzing SQLite insert gaps (30s time windows)..."
 SQLITE_GAP_DATA=$(run_on_vm "sudo sqlite3 -json /data/test.db \"
 WITH gaps AS (
   SELECT
@@ -246,8 +206,7 @@ except:
     print(0)
 " 2>/dev/null || echo "0")
 
-# --- File-writer gap analysis (persistent vdc) ---
-echo "Analyzing file-writer gaps (persistent /data/)..."
+log.verbose "Analyzing file-writer gaps (persistent /data/)..."
 FILE_WRITER_GAP_DATA=$(run_on_vm "cat /data/test/log.txt 2>/dev/null | python3 -c \"
 import sys, json, re
 from datetime import datetime
@@ -310,8 +269,7 @@ for bucket_ts in sorted(buckets.keys()):
 print(json.dumps(result))
 \"" 2>/dev/null || echo "[]")
 
-# --- Ephemeral file-writer gap analysis (vda) ---
-echo "Analyzing ephemeral file-writer gaps (/var/lib/test-ephemeral/)..."
+log.verbose "Analyzing ephemeral file-writer gaps (/var/lib/test-ephemeral/)..."
 EPHEMERAL_FILE_WRITER_GAP_DATA=$(run_on_vm "cat /var/lib/test-ephemeral/log.txt 2>/dev/null | python3 -c \"
 import sys, json, re
 from datetime import datetime
@@ -370,8 +328,7 @@ for bucket_ts in sorted(buckets.keys()):
 print(json.dumps(result))
 \"" 2>/dev/null || echo "[]")
 
-# --- Cron gap analysis ---
-echo "Analyzing cron job gaps..."
+log.verbose "Analyzing cron job gaps..."
 CRON_GAP_DATA=$(run_on_vm "cat /data/test/cron.log 2>/dev/null | python3 -c \"
 import sys, json, re
 from datetime import datetime
@@ -435,7 +392,7 @@ PRE_EPHEMERAL_LARGE_FILE_SIZE=0
 HAS_PRE="false"
 if [[ -n "$PRE_MIGRATION_FILE" && -f "$PRE_MIGRATION_FILE" ]]; then
   HAS_PRE="true"
-  echo "Loading pre-migration baseline from: ${PRE_MIGRATION_FILE}"
+  log.verbose "Loading pre-migration baseline from: ${PRE_MIGRATION_FILE}"
 
   # Parse pre-migration JSON (using python3 if available, fallback to grep)
   if command -v python3 &>/dev/null; then
@@ -525,7 +482,9 @@ if [[ "$PRE_EPHEMERAL_LARGE_FILE_SHA256" != "none" ]] && [[ "$POST_EPHEMERAL_LAR
   fi
 fi
 
-echo "Building JSON report..."
+task.pass "Gap analysis complete"
+
+task.begin "Building JSON report"
 
 cat > "$OUTPUT_FILE" << JSONEOF
 {
@@ -691,11 +650,9 @@ cat > "$OUTPUT_FILE" << JSONEOF
 }
 JSONEOF
 
-echo ""
-echo "============================================"
-echo "  Post-migration data saved to:"
-echo "  ${OUTPUT_FILE}"
-echo "============================================"
+task.pass "JSON report saved"
+log.verbose "Output: ${OUTPUT_FILE}"
+
 echo ""
 echo "--- Comparison Summary ---"
 echo ""
@@ -1035,32 +992,27 @@ if [ "$EPHEMERAL_FILE_WRITER_DIFF" -lt 0 ] || [ "$EPHEMERAL_SQLITE_DIFF" -lt 0 ]
   OVERALL="FAIL"
 fi
 
-echo "╔════════════════════════════════════════════════════════════════════════════╗"
 if [ "$OVERALL" == "PASS" ]; then
-  echo "║                         ✓ MIGRATION VALIDATION PASSED                      ║"
-  echo "╚════════════════════════════════════════════════════════════════════════════╝"
-  echo ""
-  echo "  All checks passed successfully:"
-  echo "    • Persistent data (vdc) preserved with SHA256 verification"
-  echo "    • Ephemeral data (vda) preserved (true live migration)"
-  echo "    • All workload services running"
-  echo "    • Database integrity verified"
+  log.box "✓ MIGRATION VALIDATION PASSED"
+  log.success "All checks passed successfully:"
+  log.success "  Persistent data (vdc) preserved with SHA256 verification"
+  log.success "  Ephemeral data (vda) preserved (true live migration)"
+  log.success "  All workload services running"
+  log.success "  Database integrity verified"
 else
-  echo "║                         ✗ MIGRATION VALIDATION FAILED                      ║"
-  echo "╚════════════════════════════════════════════════════════════════════════════╝"
-  echo ""
-  echo "  Issues detected - review details above:"
-  [ "$PERSISTENT_FILE_WRITER_STATUS" == "FAIL" ] && echo "    ✗ Persistent file-writer data loss"
-  [ "$PERSISTENT_SQLITE_STATUS" == "FAIL" ] && echo "    ✗ Persistent SQLite data loss"
-  [ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "FAIL" ] && echo "    ✗ Persistent SQLite corruption"
-  [ "$PERSISTENT_CRON_STATUS" == "FAIL" ] && echo "    ✗ Cron log data loss"
-  [ "$PERSISTENT_LARGE_FILE_STATUS" == "FAIL" ] && echo "    ✗ Persistent large file corruption (SHA256 mismatch)"
-  [ "$EPHEMERAL_FILE_WRITER_STATUS" == "FAIL" ] && echo "    ✗ Ephemeral file-writer data loss (cold migration?)"
-  [ "$EPHEMERAL_SQLITE_STATUS" == "FAIL" ] && echo "    ✗ Ephemeral SQLite data loss (cold migration?)"
-  [ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "FAIL" ] && echo "    ✗ Ephemeral SQLite corruption"
-  [ "$EPHEMERAL_LARGE_FILE_STATUS" == "FAIL" ] && echo "    ✗ Ephemeral large file corruption (cold migration?)"
-  [ "$HTTP_STATUS_CHECK" == "FAIL" ] && echo "    ✗ HTTP server not responding"
-  [ "$CROND_STATUS_CHECK" == "FAIL" ] && echo "    ✗ Cron daemon not active"
-  [ "$SERVICES_RUNNING_STATUS" == "FAIL" ] && echo "    ✗ Some workload services not running"
+  log.box "✗ MIGRATION VALIDATION FAILED"
+  log.error "Issues detected - review details above:"
+  [ "$PERSISTENT_FILE_WRITER_STATUS" == "FAIL" ] && log.error "Persistent file-writer data loss"
+  [ "$PERSISTENT_SQLITE_STATUS" == "FAIL" ] && log.error "Persistent SQLite data loss"
+  [ "$PERSISTENT_SQLITE_INTEGRITY_STATUS" == "FAIL" ] && log.error "Persistent SQLite corruption"
+  [ "$PERSISTENT_CRON_STATUS" == "FAIL" ] && log.error "Cron log data loss"
+  [ "$PERSISTENT_LARGE_FILE_STATUS" == "FAIL" ] && log.error "Persistent large file corruption (SHA256 mismatch)"
+  [ "$EPHEMERAL_FILE_WRITER_STATUS" == "FAIL" ] && log.error "Ephemeral file-writer data loss (cold migration?)"
+  [ "$EPHEMERAL_SQLITE_STATUS" == "FAIL" ] && log.error "Ephemeral SQLite data loss (cold migration?)"
+  [ "$EPHEMERAL_SQLITE_INTEGRITY_STATUS" == "FAIL" ] && log.error "Ephemeral SQLite corruption"
+  [ "$EPHEMERAL_LARGE_FILE_STATUS" == "FAIL" ] && log.error "Ephemeral large file corruption (cold migration?)"
+  [ "$HTTP_STATUS_CHECK" == "FAIL" ] && log.error "HTTP server not responding"
+  [ "$CROND_STATUS_CHECK" == "FAIL" ] && log.error "Cron daemon not active"
+  [ "$SERVICES_RUNNING_STATUS" == "FAIL" ] && log.error "Some workload services not running"
 fi
 echo ""

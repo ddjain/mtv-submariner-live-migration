@@ -8,12 +8,6 @@ set -euo pipefail
 # Usage:
 #   ./pre-migration-check.sh --kubeconfig <path> --vm <name> [--namespace <ns>] [--ssh-key <path>] [--output-dir <dir>]
 #
-# Example:
-#   ./pre-migration-check.sh \
-#     --kubeconfig /path/to/kubeconfig \
-#     --vm mercury-vm \
-#     --output-dir /path/to/output
-#
 
 NAMESPACE="default"
 SSH_KEY="${HOME}/.ssh/id_rsa"
@@ -50,16 +44,9 @@ done
 [[ -z "$KUBECONFIG_PATH" ]] && { echo "ERROR: --kubeconfig is required"; usage; }
 [[ -z "$VM_NAME" ]] && { echo "ERROR: --vm is required"; usage; }
 
-# Validate timeout parameters
-if [[ -z "${SSH_READY_TIMEOUT:-}" ]] || ! [[ "${SSH_READY_TIMEOUT}" =~ ^[0-9]+$ ]]; then
-  SSH_READY_TIMEOUT=300
-fi
-if [[ -z "${SSH_READY_INTERVAL:-}" ]] || ! [[ "${SSH_READY_INTERVAL}" =~ ^[0-9]+$ ]] || [[ "${SSH_READY_INTERVAL}" -eq 0 ]]; then
-  SSH_READY_INTERVAL=10
-fi
-
-# SSH options are now hardcoded in run_on_vm() function using two separate flags
-# This ensures it works with both new and changed SSH host keys
+# ── Shared libraries ──────────────────────────────────────────
+source "${SCRIPT_DIR}/lib/log.sh"
+source "${SCRIPT_DIR}/lib/ssh.sh"
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 mkdir -p "$OUTPUT_DIR"
@@ -67,56 +54,22 @@ mkdir -p "$OUTPUT_DIR"
 TIMESTAMP=$(date -u '+%Y%m%dT%H%M%SZ')
 OUTPUT_FILE="${OUTPUT_DIR}/pre-migration-${VM_NAME}-${TIMESTAMP}.json"
 
-run_on_vm() {
-  virtctl ssh "${SSH_USER}@vm/${VM_NAME}" \
-    --namespace "$NAMESPACE" \
-    --identity-file="$SSH_KEY" \
-    --local-ssh-opts="-o StrictHostKeyChecking=no" \
-    --local-ssh-opts="-o UserKnownHostsFile=/dev/null" \
-    --command "$1"
-}
+log.verbose "Pre-Migration Check: ${VM_NAME} (${TIMESTAMP})"
 
-wait_for_guest_ssh() {
-  if [[ "${SSH_READY_TIMEOUT}" -eq 0 ]]; then
-    return 0
-  fi
-  local max_attempts=$(( SSH_READY_TIMEOUT / SSH_READY_INTERVAL ))
-  if [[ "${max_attempts}" -lt 1 ]]; then
-    max_attempts=1
-  fi
-  local attempt=1
-  echo "Waiting for guest SSH (virtctl) — up to ${SSH_READY_TIMEOUT}s, every ${SSH_READY_INTERVAL}s..."
-  while [[ "${attempt}" -le "${max_attempts}" ]]; do
-    if run_on_vm "true" >/dev/null 2>&1; then
-      echo "Guest SSH is reachable (attempt ${attempt}/${max_attempts})."
-      echo ""
-      return 0
-    fi
-    echo "  SSH not ready yet (attempt ${attempt}/${max_attempts}), retrying in ${SSH_READY_INTERVAL}s..."
-    sleep "${SSH_READY_INTERVAL}"
-    attempt=$(( attempt + 1 ))
-  done
-  echo "ERROR: Guest SSH did not become reachable within ${SSH_READY_TIMEOUT}s."
-  exit 1
-}
-
-echo "============================================"
-echo "  Pre-Migration Check: ${VM_NAME}"
-echo "  Timestamp: ${TIMESTAMP}"
-echo "============================================"
-echo ""
-
+# ── Wait for SSH ──────────────────────────────────────────────
 wait_for_guest_ssh
 
-echo "Collecting cluster info..."
+# ── Collect cluster info ──────────────────────────────────────
+task.begin "Collecting cluster info"
 CLUSTER_SERVER=$(kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}' 2>/dev/null || echo "unknown")
 VM_STATUS=$(kubectl get vm "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.printableStatus}' 2>/dev/null || echo "unknown")
 VM_NODE=$(kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.nodeName}' 2>/dev/null || echo "unknown")
 VM_IP=$(kubectl get vmi "$VM_NAME" -n "$NAMESPACE" -o jsonpath='{.status.interfaces[0].ipAddress}' 2>/dev/null || echo "unknown")
+task.pass "Cluster info collected"
 
-echo "Collecting VM workload data..."
+# ── Collect VM workload data (stdout captured — no logging inside) ──
+task.begin "Collecting VM workload data"
 VM_DATA=$(run_on_vm "
-# Gather all data as key=value pairs for easy parsing
 echo \"CAPTURE_TIME_UTC=\$(date -u '+%Y-%m-%dT%H:%M:%S UTC')\"
 echo \"CAPTURE_TIME_LOCAL=\$(date '+%Y-%m-%d %H:%M:%S %Z')\"
 
@@ -151,7 +104,6 @@ echo \"DATA_DIR_SIZE=\$(du -sb /data/test/ 2>/dev/null | cut -f1 || echo 0)\"
 echo \"LARGE_FILE_SIZE=\$(stat -c%s /data/large-file.bin 2>/dev/null || echo 0)\"
 echo \"LARGE_FILE_SHA256=\$(sha256sum /data/large-file.bin 2>/dev/null | awk '{print \$1}' || echo none)\"
 
-# Ephemeral disk (vda) data
 echo \"EPHEMERAL_FILE_WRITER_LINES=\$(wc -l < /var/lib/test-ephemeral/log.txt 2>/dev/null || echo 0)\"
 echo \"EPHEMERAL_FILE_WRITER_SIZE=\$(du -b /var/lib/test-ephemeral/log.txt 2>/dev/null | cut -f1 || echo 0)\"
 echo \"EPHEMERAL_FILE_WRITER_LAST=\$(tail -1 /var/lib/test-ephemeral/log.txt 2>/dev/null || echo none)\"
@@ -168,13 +120,14 @@ echo \"EPHEMERAL_DIR_SIZE=\$(du -sb /var/lib/test-ephemeral/ 2>/dev/null | cut -
 echo \"EPHEMERAL_LARGE_FILE_SIZE=\$(stat -c%s /var/lib/test-ephemeral/large-file.bin 2>/dev/null || echo 0)\"
 echo \"EPHEMERAL_LARGE_FILE_SHA256=\$(sha256sum /var/lib/test-ephemeral/large-file.bin 2>/dev/null | awk '{print \$1}' || echo none)\"
 ")
+task.pass "VM workload data collected"
 
-# Parse key=value pairs into variables
 get_val() {
   echo "$VM_DATA" | grep "^${1}=" | head -1 | cut -d'=' -f2-
 }
 
-echo "Building JSON report..."
+# ── Build JSON report ─────────────────────────────────────────
+task.begin "Building JSON report"
 
 cat > "$OUTPUT_FILE" << JSONEOF
 {
@@ -280,18 +233,15 @@ cat > "$OUTPUT_FILE" << JSONEOF
 }
 JSONEOF
 
-echo ""
-echo "============================================"
-echo "  Pre-migration data saved to:"
-echo "  ${OUTPUT_FILE}"
-echo "============================================"
-echo ""
-echo "Quick summary:"
-echo "  Persistent (vdc):"
-echo "    File writer:  $(get_val FILE_WRITER_LINES) lines, PID $(get_val FILE_WRITER_PID)"
-echo "    SQLite DB:    $(get_val SQLITE_ROWS) rows, integrity=$(get_val SQLITE_INTEGRITY)"
-echo "    Cron log:     $(get_val CRON_LINES) entries, crond=$(get_val CROND_STATUS)"
-echo "    HTTP server:  status=$(get_val HTTP_STATUS), PID $(get_val HTTP_PID)"
-echo "  Ephemeral (vda):"
-echo "    File writer:  $(get_val EPHEMERAL_FILE_WRITER_LINES) lines, PID $(get_val EPHEMERAL_FILE_WRITER_PID)"
-echo "    SQLite DB:    $(get_val EPHEMERAL_SQLITE_ROWS) rows, integrity=$(get_val EPHEMERAL_SQLITE_INTEGRITY)"
+task.pass "JSON report saved"
+log.verbose "Output: ${OUTPUT_FILE}"
+
+# ── Quick summary (verbose only) ──────────────────────────────
+log.verbose "Persistent (vdc):"
+log.verbose "  File writer:  $(get_val FILE_WRITER_LINES) lines, PID $(get_val FILE_WRITER_PID)"
+log.verbose "  SQLite DB:    $(get_val SQLITE_ROWS) rows, integrity=$(get_val SQLITE_INTEGRITY)"
+log.verbose "  Cron log:     $(get_val CRON_LINES) entries, crond=$(get_val CROND_STATUS)"
+log.verbose "  HTTP server:  status=$(get_val HTTP_STATUS), PID $(get_val HTTP_PID)"
+log.verbose "Ephemeral (vda):"
+log.verbose "  File writer:  $(get_val EPHEMERAL_FILE_WRITER_LINES) lines, PID $(get_val EPHEMERAL_FILE_WRITER_PID)"
+log.verbose "  SQLite DB:    $(get_val EPHEMERAL_SQLITE_ROWS) rows, integrity=$(get_val EPHEMERAL_SQLITE_INTEGRITY)"

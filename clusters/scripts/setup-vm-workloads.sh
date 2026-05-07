@@ -14,17 +14,6 @@ set -euo pipefail
 #   2. Transferring the workload bundle to the VM (base64-encoded tar)
 #   3. Invoking the guest-side setup.sh via sudo
 #
-# Usage:
-#   ./setup-vm-workloads.sh --kubeconfig <path> --vm <name> [OPTIONS]
-#
-# Example:
-#   ./setup-vm-workloads.sh \
-#     --kubeconfig /path/to/kubeconfig \
-#     --vm mercury-vm \
-#     --namespace default \
-#     --ssh-key ~/.ssh/id_rsa \
-#     --template-dir /path/to/templates
-#
 
 NAMESPACE="default"
 SSH_KEY="${HOME}/.ssh/id_rsa"
@@ -85,73 +74,39 @@ done
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TEMPLATE_DIR="${TEMPLATE_DIR:-${SCRIPT_DIR}/../../templates}"
 
-WORKLOAD_DIR="${TEMPLATE_DIR}/vm-workloads"
-[[ -d "$WORKLOAD_DIR" ]] || { echo "ERROR: Workload templates not found: ${WORKLOAD_DIR}"; exit 1; }
-[[ -f "$WORKLOAD_DIR/setup.sh" ]] || { echo "ERROR: Guest setup script not found: ${WORKLOAD_DIR}/setup.sh"; exit 1; }
+# ── Shared libraries ──────────────────────────────────────────
+source "${SCRIPT_DIR}/lib/log.sh"
+source "${SCRIPT_DIR}/lib/ssh.sh"
 
-if [[ -z "${SSH_READY_TIMEOUT:-}" ]] || ! [[ "${SSH_READY_TIMEOUT}" =~ ^[0-9]+$ ]]; then
-  SSH_READY_TIMEOUT=600
-fi
-if [[ -z "${SSH_READY_INTERVAL:-}" ]] || ! [[ "${SSH_READY_INTERVAL}" =~ ^[0-9]+$ ]] || [[ "${SSH_READY_INTERVAL}" -eq 0 ]]; then
-  SSH_READY_INTERVAL=15
-fi
+WORKLOAD_DIR="${TEMPLATE_DIR}/vm-workloads"
+[[ -d "$WORKLOAD_DIR" ]] || { log.error "Workload templates not found: ${WORKLOAD_DIR}"; exit 1; }
+[[ -f "$WORKLOAD_DIR/setup.sh" ]] || { log.error "Guest setup script not found: ${WORKLOAD_DIR}/setup.sh"; exit 1; }
 
 export KUBECONFIG="$KUBECONFIG_PATH"
 
-run_on_vm() {
-  virtctl ssh "${SSH_USER}@vm/${VM_NAME}" \
-    --namespace "$NAMESPACE" \
-    --identity-file="$SSH_KEY" \
-    --local-ssh-opts="-o StrictHostKeyChecking=no" \
-    --local-ssh-opts="-o UserKnownHostsFile=/dev/null" \
-    --command "$1"
-}
+log.verbose "VM Workload Setup: ${VM_NAME}"
 
-wait_for_guest_ssh() {
-  if [[ "${SSH_READY_TIMEOUT}" -eq 0 ]]; then
-    return 0
-  fi
-  local max_attempts=$(( SSH_READY_TIMEOUT / SSH_READY_INTERVAL ))
-  if [[ "${max_attempts}" -lt 1 ]]; then
-    max_attempts=1
-  fi
-  local attempt=1
-  echo "Waiting for guest SSH (virtctl) — up to ${SSH_READY_TIMEOUT}s, every ${SSH_READY_INTERVAL}s..."
-  while [[ "${attempt}" -le "${max_attempts}" ]]; do
-    if run_on_vm "true" >/dev/null 2>&1; then
-      echo "Guest SSH is reachable (attempt ${attempt}/${max_attempts})."
-      echo ""
-      return 0
-    fi
-    echo "  SSH not ready yet (attempt ${attempt}/${max_attempts}), retrying in ${SSH_READY_INTERVAL}s..."
-    sleep "${SSH_READY_INTERVAL}"
-    attempt=$(( attempt + 1 ))
-  done
-  echo "ERROR: Guest SSH did not become reachable within ${SSH_READY_TIMEOUT}s."
-  exit 1
-}
-
-echo "============================================"
-echo "  VM Workload Setup: ${VM_NAME}"
-echo "============================================"
-echo ""
-
+# ── Wait for SSH ──────────────────────────────────────────────
 wait_for_guest_ssh
 
-# ── Transfer workload bundle to VM ────────────────────────
-#
-# Pack the vm-workloads directory into a base64-encoded tarball and
-# unpack it on the VM in a single SSH call. This avoids depending on
-# virtctl scp (which may not work through all tunnel setups) and
-# reduces the transfer to one SSH session.
-
-echo "Transferring workload bundle to VM..."
+# ── Transfer workload bundle ──────────────────────────────────
+task.begin "Transferring bundle"
+log.debug "tar -czf - -C '${TEMPLATE_DIR}' vm-workloads | base64"
 BUNDLE=$(tar -czf - -C "${TEMPLATE_DIR}" vm-workloads | base64)
+run_on_vm "echo '${BUNDLE}' | base64 -d | sudo tar -xzf - -C /tmp/ && echo 'Bundle extracted to /tmp/vm-workloads/'" >/dev/null 2>&1
+task.pass "Bundle transferred"
 
-run_on_vm "echo '${BUNDLE}' | base64 -d | sudo tar -xzf - -C /tmp/ && echo 'Bundle extracted to /tmp/vm-workloads/'"
+# ── Run guest-side setup ──────────────────────────────────────
+task.begin "Running guest setup"
+GUEST_EXIT=0
+GUEST_OUTPUT=$(run_on_vm "sudo bash /tmp/vm-workloads/setup.sh ${LARGE_DATA_SIZE_MB} ${LARGE_DATA_SIZE_MB_EPHEMERAL}" 2>&1) || GUEST_EXIT=$?
 
-# ── Run guest-side setup ──────────────────────────────────
+if [[ "$GUEST_EXIT" -ne 0 ]]; then
+  task.fail "Guest setup" "exit code ${GUEST_EXIT}"
+  log.info ""
+  log.info "$GUEST_OUTPUT"
+  exit 1
+fi
 
-echo "Running setup on VM..."
-echo ""
-run_on_vm "sudo bash /tmp/vm-workloads/setup.sh ${LARGE_DATA_SIZE_MB} ${LARGE_DATA_SIZE_MB_EPHEMERAL}"
+task.pass "Guest setup (6 workloads)"
+log.verbose "$GUEST_OUTPUT"

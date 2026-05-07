@@ -15,11 +15,12 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${SCRIPT_DIR}/lib/log.sh"
+
 # ──────────────────────────────────────────────
 # Configuration
 # ──────────────────────────────────────────────
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CCLM_ENV_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 BLUE_KUBECONFIG="${BLUE_KUBECONFIG:-${CCLM_ENV_DIR}/blue-cluster/auth/kubeconfig}"
@@ -65,15 +66,17 @@ done
 # ──────────────────────────────────────────────
 
 cleanup() {
-    echo ""
-    echo ">>> Stopping all log collectors..."
+    log.info ""
+    log.info "Stopping all log collectors..."
     for pid in "${PIDS[@]}"; do
         kill "$pid" 2>/dev/null || true
     done
     wait 2>/dev/null || true
-    echo ">>> Logs saved to: ${LOG_DIR}"
-    echo ">>> Files collected:"
-    ls -1 "${LOG_DIR}"
+    log.success "Logs saved to: ${LOG_DIR}"
+    log.verbose "Files collected:"
+    if [[ "$LOG_LEVEL" -ge 2 ]]; then
+        ls -1 "${LOG_DIR}"
+    fi
 }
 
 trap cleanup EXIT INT TERM
@@ -101,17 +104,14 @@ find_pods() {
 # Preflight checks
 # ──────────────────────────────────────────────
 
-echo "============================================="
-echo " CCLM Migration Log Capture"
-echo "============================================="
-echo "  VM:           ${VM_NAME}"
-echo "  Namespace:    ${VM_NAMESPACE}"
-echo "  Blue config:  ${BLUE_KUBECONFIG}"
-echo "  Green config: ${GREEN_KUBECONFIG}"
-echo "  Output dir:   ${LOG_DIR}"
-echo "  Duration:     ${DURATION:-until Ctrl-C}"
-echo "============================================="
-echo ""
+log.banner "CCLM Migration Log Capture"
+log.info "  VM:           ${VM_NAME}"
+log.info "  Namespace:    ${VM_NAMESPACE}"
+log.verbose "  Blue config:  ${BLUE_KUBECONFIG}"
+log.verbose "  Green config: ${GREEN_KUBECONFIG}"
+log.info "  Output dir:   ${LOG_DIR}"
+log.info "  Duration:     ${DURATION:-until Ctrl-C}"
+log.info ""
 
 for kc in "$BLUE_KUBECONFIG" "$GREEN_KUBECONFIG"; do
     if [[ ! -f "$kc" ]]; then
@@ -126,7 +126,7 @@ mkdir -p "${LOG_DIR}"
 # Snapshot: capture current pod state
 # ──────────────────────────────────────────────
 
-echo ">>> Capturing initial cluster state..."
+task.begin "Capturing initial cluster state"
 
 {
     echo "=== Blue: openshift-cnv pods ==="
@@ -156,14 +156,13 @@ echo ">>> Capturing initial cluster state..."
     KUBECONFIG="$GREEN_KUBECONFIG" kubectl get vm,vmi -n "$VM_NAMESPACE" -o wide 2>&1
 } > "${LOG_DIR}/green-initial-state.log"
 
-echo ">>> Initial state captured."
-echo ""
+task.pass "Initial state captured"
 
 # ══════════════════════════════════════════════
 #  BLUE CLUSTER (Source) Log Collectors
 # ══════════════════════════════════════════════
 
-echo ">>> Starting BLUE (source) cluster collectors..."
+task.begin "Starting BLUE (source) collectors"
 
 # --- Pod logs ---
 
@@ -239,13 +238,9 @@ bg_log "blue-default-events.log" \
     env KUBECONFIG="$BLUE_KUBECONFIG" \
     kubectl get events -n "$VM_NAMESPACE" -w
 
-echo ""
+task.pass "BLUE collectors started"
 
-# ══════════════════════════════════════════════
-#  GREEN CLUSTER (Destination) Log Collectors
-# ══════════════════════════════════════════════
-
-echo ">>> Starting GREEN (destination) cluster collectors..."
+task.begin "Starting GREEN (destination) collectors"
 
 # --- Pod logs ---
 
@@ -342,20 +337,20 @@ bg_log "green-mtv-events.log" \
     env KUBECONFIG="$GREEN_KUBECONFIG" \
     kubectl get events -n openshift-mtv -w
 
-echo ""
-echo "============================================="
-echo " All collectors running (${#PIDS[@]} processes)"
-echo " Logs streaming to: ${LOG_DIR}"
-echo " Press Ctrl-C to stop collection"
-echo "============================================="
-echo ""
+task.pass "GREEN collectors started"
+
+log.info ""
+log.success "All collectors running (${#PIDS[@]} processes)"
+log.info "  Logs streaming to: ${LOG_DIR}"
+log.info "  Press Ctrl-C to stop collection"
+log.info ""
 
 # ──────────────────────────────────────────────
 # Wait
 # ──────────────────────────────────────────────
 
 if [[ -n "$DURATION" ]]; then
-    echo ">>> Auto-stopping in ${DURATION} seconds..."
+    log.info "Auto-stopping in ${DURATION} seconds..."
     sleep "$DURATION"
 else
     while true; do sleep 60; done

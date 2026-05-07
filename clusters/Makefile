@@ -58,6 +58,9 @@ CHAOS_SCENARIO ?=
 # Skip Prometheus/VMIM metrics collection after migration (default: false = collect)
 SKIP_PROMETHEUS_METRICS ?= false
 
+# Logging verbosity: 1=summary (default), 2=verbose, 3=debug
+LOG_LEVEL ?= 1
+
 SCRIPTS_DIR   := $(CURDIR)/scripts
 TEMPLATE_DIR  := $(CURDIR)/../templates
 GENERATED_DIR := $(CURDIR)/scripts/generated
@@ -71,7 +74,7 @@ PRE_FILE ?= $(shell ls -t $(OUTPUT_DIR)/pre-migration-$(VM_NAME)-*.json 2>/dev/n
 
 .PHONY: create-vm
 create-vm: ## Create a VM on source cluster from template
-	@$(SCRIPTS_DIR)/create-vm.sh \
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/create-vm.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--vm $(VM_NAME) \
 		--namespace $(NAMESPACE) \
@@ -81,7 +84,7 @@ create-vm: ## Create a VM on source cluster from template
 
 .PHONY: migrate-vm
 migrate-vm: ## Create migration plan and trigger live migration
-	@$(SCRIPTS_DIR)/migrate-vm.sh \
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/migrate-vm.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--vm $(VM_NAME) \
 		--namespace $(NAMESPACE) \
@@ -95,23 +98,19 @@ delete-vm: ## Delete a VM from source cluster
 	@echo "Done."
 
 .PHONY: clean-vms
-clean-vms: ## Delete ALL VMs, VMIs, and DataVolumes from both clusters
+clean-vms: ## Delete ALL VMs, VMIs, and DataVolumes from both clusters (handles stuck resources)
 	@echo "=== Cleaning VMs from SOURCE (Blue) ==="
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete vm --all -n $(NAMESPACE) --ignore-not-found
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete vmi --all -n $(NAMESPACE) --ignore-not-found
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete dv --all -n $(NAMESPACE) --ignore-not-found
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/force-clean-vms.sh $(SOURCE_KUBECONFIG) $(NAMESPACE)
 	@echo ""
 	@echo "=== Cleaning VMs from TARGET (Green) ==="
-	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl delete vm --all -n $(NAMESPACE) --ignore-not-found
-	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl delete vmi --all -n $(NAMESPACE) --ignore-not-found
-	@KUBECONFIG=$(TARGET_KUBECONFIG) kubectl delete dv --all -n $(NAMESPACE) --ignore-not-found
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/force-clean-vms.sh $(TARGET_KUBECONFIG) $(NAMESPACE)
 	@echo "Done."
 
 .PHONY: clean-migrations
 clean-migrations: ## Delete ALL Migration and Plan resources from openshift-mtv
 	@echo "=== Cleaning Migrations ==="
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete migration --all -n openshift-mtv --ignore-not-found
-	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete plan --all -n openshift-mtv --ignore-not-found
+	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete migration --all -n openshift-mtv --ignore-not-found 2>/dev/null || true
+	@KUBECONFIG=$(SOURCE_KUBECONFIG) kubectl delete plan --all -n openshift-mtv --ignore-not-found 2>/dev/null || true
 	@echo "Done."
 
 .PHONY: clean-all
@@ -119,7 +118,7 @@ clean-all: clean-migrations clean-vms ## Delete ALL VMs and migration resources 
 
 .PHONY: run-e2e
 run-e2e: ## Full e2e: random VM (or VM_NAME_OVERRIDE), create, setup, pre-check, migrate, wait, post-check
-	@$(SCRIPTS_DIR)/run-e2e.sh \
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/run-e2e.sh \
 		--source-kubeconfig $(SOURCE_KUBECONFIG) \
 		--target-kubeconfig $(TARGET_KUBECONFIG) \
 		--ssh-key $(SSH_KEY) \
@@ -138,13 +137,21 @@ run-e2e: ## Full e2e: random VM (or VM_NAME_OVERRIDE), create, setup, pre-check,
 		$(if $(filter true,$(SKIP_PROMETHEUS_METRICS)),--skip-prometheus-metrics,) \
 		$(if $(CHAOS_SCENARIO),--chaos-scenario "$(CHAOS_SCENARIO)",)
 
+.PHONY: run-e2e-verbose
+run-e2e-verbose: LOG_LEVEL=2
+run-e2e-verbose: run-e2e ## Full e2e with verbose output (LOG_LEVEL=2)
+
+.PHONY: run-e2e-debug
+run-e2e-debug: LOG_LEVEL=3
+run-e2e-debug: run-e2e ## Full e2e with debug output (LOG_LEVEL=3)
+
 # ──────────────────────────────────────────────
 # Validation & Workloads
 # ──────────────────────────────────────────────
 
 .PHONY: setup
 setup: ## Setup workloads on source cluster VM
-	@$(SCRIPTS_DIR)/setup-vm-workloads.sh \
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/setup-vm-workloads.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--vm $(VM_NAME) \
 		--namespace $(NAMESPACE) \
@@ -159,7 +166,7 @@ setup: ## Setup workloads on source cluster VM
 .PHONY: pre-check
 pre-check: ## Run pre-migration checklist on source cluster
 	@mkdir -p $(OUTPUT_DIR)
-	@$(SCRIPTS_DIR)/pre-migration-check.sh \
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/pre-migration-check.sh \
 		--kubeconfig $(SOURCE_KUBECONFIG) \
 		--vm $(VM_NAME) \
 		--namespace $(NAMESPACE) \
@@ -171,7 +178,7 @@ pre-check: ## Run pre-migration checklist on source cluster
 .PHONY: post-check
 post-check: ## Run post-migration checklist on target cluster (auto-picks latest pre-check)
 	@mkdir -p $(OUTPUT_DIR)
-	@$(SCRIPTS_DIR)/post-migration-check.sh \
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/post-migration-check.sh \
 		--kubeconfig $(TARGET_KUBECONFIG) \
 		--vm $(VM_NAME) \
 		--namespace $(NAMESPACE) \
@@ -187,7 +194,7 @@ post-check: ## Run post-migration checklist on target cluster (auto-picks latest
 
 .PHONY: capture-logs
 capture-logs: ## Capture pod logs, watches & events from both clusters during migration
-	@$(SCRIPTS_DIR)/capture-migration-logs.sh \
+	@LOG_LEVEL=$(LOG_LEVEL) $(SCRIPTS_DIR)/capture-migration-logs.sh \
 		--vm $(VM_NAME) \
 		--namespace $(NAMESPACE) \
 		$(if $(DURATION),--duration $(DURATION),)
@@ -256,6 +263,7 @@ help: ## Show this help
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2}'
 	@echo ""
 	@echo "Override variables: VM_NAME=x NAMESPACE=x SSH_KEY=x SSH_USER=x"
+	@echo "  LOG_LEVEL=1 (default: summary), LOG_LEVEL=2 (verbose), LOG_LEVEL=3 (debug)"
 	@echo "  LOCAL_SSH_OPTS='-o StrictHostKeyChecking=accept-new' for unattended SSH on setup/pre/post-check"
 	@echo "  VM_NAME_OVERRIDE=name for make run-e2e (fixed VM instead of random)"
 	@echo "  SSH_READY_TIMEOUT=900           seconds to wait for guest SSH after VM Ready (default 600)"
@@ -264,6 +272,10 @@ help: ## Show this help
 	@echo "  PAUSE_BEFORE_MIGRATION=true     pause before migration step for manual intervention (default: false)"
 	@echo "  CHAOS_SCENARIO=name             label for chaos test in migration-metrics JSON (default: empty)"
 	@echo "  SKIP_PROMETHEUS_METRICS=true     skip Prometheus/VMIM metrics after migration (default: false)"
+	@echo ""
+	@echo "Convenience aliases:"
+	@echo "  make run-e2e-verbose   # run-e2e with LOG_LEVEL=2"
+	@echo "  make run-e2e-debug     # run-e2e with LOG_LEVEL=3"
 	@echo ""
 
 .DEFAULT_GOAL := help

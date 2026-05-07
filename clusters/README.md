@@ -1,85 +1,107 @@
-# VM Migration Toolkit
+# Automated E2E Migration Pipeline
 
-Automated end-to-end cross-cluster live migration of KubeVirt VMs using MTV (Forklift) and Submariner.
-
-## Prerequisites
-
-### CLI Tools
-
-- `kubectl` / `oc`
-- `virtctl` — [KubeVirt CLI](https://kubevirt.io/user-guide/user_workloads/virtctl_client_tool/)
-- `jq`
-- `bash` ≥ 4.x
-
-### Cluster Setup
-
-Two OpenShift clusters (blue = source, green = target) with the following operators installed on **both**:
-
-- OpenShift Virtualization (CNV)
-- Migration Toolkit for Virtualization (MTV / Forklift)
-- Submariner (cross-cluster networking)
-
-MTV must be pre-configured on the **source** cluster with:
-
-- A `Provider` for the target cluster (named `green-cluster` in `openshift-mtv`)
-- A `NetworkMap` (named `blue-green-network-map` in `openshift-mtv`)
-- A `StorageMap` (named `blue-green-storage-map` in `openshift-mtv`)
-
-### Local Configuration
-
-1. **Kubeconfigs** — place them at (or symlink to):
-
-   ```
-   clusters/source-cluster/auth/kubeconfig
-   clusters/target-cluster/auth/kubeconfig
-   ```
-
-2. **SSH key pair** — default is `~/.ssh/id_rsa` (override with `SSH_KEY=`). The public key (`id_rsa.pub`) is injected into the VM via cloud-init.
+Once infrastructure is set up (see root [README.md](../README.md) Phases 1-4), you can run the full migration pipeline automatically using the Makefile in this directory.
 
 ## Quick Start
 
 ```bash
 cd clusters
 
-# Full automated pipeline (random VM name, unattended SSH)
+# Full pipeline with a random VM name
 make run-e2e
 
-# Or step-by-step
-make create-vm    VM_NAME=my-vm
-make setup        VM_NAME=my-vm
-make pre-check    VM_NAME=my-vm
-make migrate-vm   VM_NAME=my-vm
-make post-check   VM_NAME=my-vm
+# Full pipeline with a specific VM name and chaos scenario label
+make run-e2e VM_NAME_OVERRIDE=my-test-vm CHAOS_SCENARIO=a4-kill-virt-handler
+
+# Pause before migration (for manual chaos injection)
+make run-e2e PAUSE_BEFORE_MIGRATION=true
 ```
 
-## Makefile Variables
+## Pipeline Steps
+
+The `run-e2e` target runs these steps in order:
+
+| Step | Target | Description |
+|------|--------|-------------|
+| 1/6 | `create-vm` | Create a VM on source (blue) cluster from template |
+| 2/6 | `setup` | SSH into VM, install workloads (file-writer, sqlite, http, cron) |
+| 3/6 | `pre-check` | Capture baseline state as JSON |
+| 4/6 | `migrate-vm` | Create MTV Plan + trigger live migration |
+| 5/6 | *(built-in)* | Wait for migration to complete, collect metrics |
+| 6/6 | `post-check` | Validate data integrity, compare with baseline |
+
+Each step can also be run individually: `make create-vm`, `make setup`, etc.
+
+## Logging Levels
+
+The pipeline supports three verbosity tiers controlled by `LOG_LEVEL`:
+
+| Level | Flag | Output |
+|-------|------|--------|
+| 1 (default) | — | Clean step summaries with PASS/FAIL |
+| 2 (verbose) | `--verbose` | Substep detail, SSH retries, timing |
+| 3 (debug) | `--debug` | Raw command traces with timestamps |
+
+```bash
+# Via environment variable
+make run-e2e LOG_LEVEL=2
+
+# Convenience aliases
+make run-e2e-verbose    # LOG_LEVEL=2
+make run-e2e-debug      # LOG_LEVEL=3
+
+# Via CLI flags (run-e2e.sh directly)
+./scripts/run-e2e.sh --source-kubeconfig ... --verbose
+./scripts/run-e2e.sh --source-kubeconfig ... --debug
+```
+
+On failure, the last 30 lines of output are auto-expanded regardless of log level, with a pointer to the full log file.
+
+ANSI colors auto-disable when output is piped or redirected (CI-safe).
+
+## Key Variables
 
 | Variable | Default | Description |
-|---|---|---|
-| `VM_NAME` | `nexus-vm` | VM name for individual targets |
-| `VM_NAME_OVERRIDE` | *(random)* | Fixed VM name for `run-e2e` |
-| `NAMESPACE` | `default` | Kubernetes namespace |
-| `SSH_KEY` | `~/.ssh/id_rsa` | SSH private key path |
-| `SSH_USER` | `centos` | Guest OS user |
-| `LOCAL_SSH_OPTS` | | SSH options (e.g. `-o StrictHostKeyChecking=accept-new`) |
-| `SSH_READY_TIMEOUT` | `600` | Seconds to wait for guest SSH after VM boots |
+|----------|---------|-------------|
+| `LOG_LEVEL` | `1` | Logging verbosity (1=summary, 2=verbose, 3=debug) |
+| `VM_NAME_OVERRIDE` | *(random)* | Fixed VM name instead of random |
+| `NAMESPACE` | `default` | Target namespace |
+| `PAUSE_BEFORE_MIGRATION` | `false` | Pause for manual intervention before step 4 |
+| `CHAOS_SCENARIO` | *(empty)* | Label for chaos test in metrics JSON |
+| `SKIP_PROMETHEUS_METRICS` | `false` | Skip Prometheus/VMIM metrics collection |
+| `STABILIZE_WAIT` | `30` | Seconds to wait after workload setup |
+| `LARGE_DATA_SIZE_MB` | `500` | Size of persistent test data file |
+| `SSH_READY_TIMEOUT` | `600` | Max seconds to wait for guest SSH |
 
-## Directory Structure
+Run `make help` for the full list of targets and variables.
 
+## Chaos Testing
+
+Chaos trigger scripts are included for fault injection during migration:
+
+```bash
+# Auto-detect VM and kill virt-handler on destination
+bash clusters/scripts/chaos-trigger.sh
+
+# A4: Kill virt-handler on Green when VMIM reaches Running
+bash clusters/scripts/chaos-trigger-a4.sh <vm-name>
+
+# A5: Kill virt-controller on Green during early VMIM phase
+bash clusters/scripts/chaos-trigger-a5.sh <vm-name>
 ```
-clusters/
-├── Makefile                     # Orchestration targets
-├── README.md
-├── source-cluster/auth/kubeconfig   # (git-ignored)
-├── target-cluster/auth/kubeconfig   # (git-ignored)
-└── scripts/
-    ├── create-vm.sh             # Create VM from template
-    ├── setup-vm-workloads.sh    # Install workloads via SSH
-    ├── pre-migration-check.sh   # Capture baseline state
-    ├── migrate-vm.sh            # Create plan + trigger migration
-    ├── post-migration-check.sh  # Validate on target cluster
-    ├── run-e2e.sh               # Full pipeline orchestrator
-    ├── capture-migration-logs.sh
-    ├── generated/               # Rendered manifests (git-ignored)
-    └── reports/                 # Check results JSON (git-ignored)
+
+These integrate with the logging system and show structured step/phase output.
+
+## Reports
+
+All runs produce JSON reports in `scripts/reports/`:
+
+- `pre-migration-<vm>-<timestamp>.json` — baseline workload state
+- `post-migration-<vm>-<timestamp>.json` — post-migration state + comparison
+- `migration-metrics-<vm>-<timestamp>.json` — pipeline timings, pod restarts
+- `prometheus-metrics-<vm>-<timestamp>.json` — Thanos/VMIM metrics
+
+```bash
+make list-reports       # list all reports
+make clean-reports      # remove all reports
 ```
